@@ -95,3 +95,65 @@ async fn checker_does_not_hide_leak_after_aligned_compressed_extent() {
     let err = check_bytes(&image, &bytes).await.unwrap_err();
     assert!(err.to_string().contains("leak"), "{err}");
 }
+
+#[tokio::test]
+async fn exact_checker_reports_nonzero_mismatches_and_metadata_overlaps() {
+    let (image, mut bytes, l2, _, ref_offset) = fixture().await;
+    bytes[ref_offset..ref_offset + 2].copy_from_slice(&2_u16.to_be_bytes());
+    std::fs::write(image.path(), &bytes).unwrap();
+    let p = Qcow2DevParams::new(9, None, None, true, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let report = dev.check_report().await.unwrap();
+    assert!(report
+        .mismatches
+        .iter()
+        .any(|m| m.expected == 1 && m.actual == 2));
+    drop(dev);
+    let rt = be64(&bytes, 48);
+    bytes[l2..l2 + 8].copy_from_slice(&((1_u64 << 63) | rt).to_be_bytes());
+    std::fs::write(image.path(), &bytes).unwrap();
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    assert!(dev
+        .check()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("overlap"));
+}
+
+#[tokio::test]
+async fn exact_checker_scans_refblocks_after_table_gaps() {
+    let (image, mut bytes, _, _, _) = fixture().await;
+    let rt = be64(&bytes, 48) as usize;
+    let rb = be64(&bytes, rt) as usize;
+    let added = bytes.len().div_ceil(CLUSTER) * CLUSTER;
+    bytes.resize(added + CLUSTER, 0);
+    bytes[rt + 16..rt + 24].copy_from_slice(&(added as u64).to_be_bytes());
+    bytes[rb + added / CLUSTER * 2..rb + added / CLUSTER * 2 + 2]
+        .copy_from_slice(&1_u16.to_be_bytes());
+    bytes[added + 6..added + 8].copy_from_slice(&1_u16.to_be_bytes());
+    std::fs::write(image.path(), &bytes).unwrap();
+    let p = Qcow2DevParams::new(9, None, None, true, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let report = dev.check_report().await.unwrap();
+    assert!(report
+        .mismatches
+        .iter()
+        .any(|m| m.host_cluster == 2 * (CLUSTER as u64 / 2) + 3
+            && m.actual == 1
+            && m.expected == 0));
+}
+
+#[tokio::test]
+async fn exact_checker_accounts_for_internal_snapshots() {
+    let (image, _, _, _, _) = fixture().await;
+    let output = std::process::Command::new("qemu-img")
+        .args(["snapshot", "-c", "saved"])
+        .arg(image.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let p = Qcow2DevParams::new(9, None, None, true, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.check().await.unwrap();
+}

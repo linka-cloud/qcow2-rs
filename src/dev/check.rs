@@ -124,10 +124,6 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok((allocated, compressed))
     }
 
-    fn is_allocated_cluster_in_use(set: &Vec<&RangeInclusive<u64>>, cluster: u64) -> bool {
-        set.iter().any(|range| range.contains(&cluster))
-    }
-
     /// Return Host Cluster usage, such as, allocated clusters, how many of them
     /// are compressed, ...
     pub async fn qcow2_cluster_usage<F>(&self, cls_usage: F) -> Qcow2Result<()>
@@ -157,65 +153,6 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(())
     }
 
-    /// check if any cluster is leaked
-    async fn check_cluster_leak(&self) -> Qcow2Result<bool> {
-        let info = &self.info;
-        let mut set: HashMap<u64, RangeInclusive<u64>> = HashMap::new();
-        let mut res = false;
-
-        //add header cluster into set
-        Self::add_used_cluster_to_set(&mut set, 0);
-
-        self.add_refcount_table_clusters(&mut set).await?;
-        self.add_l1_table_clusters(&mut set).await?;
-        self.add_table_clusters(&self.l1table, &mut set).await;
-        self.add_table_clusters(&self.reftable, &mut set).await;
-        let _ = self.add_data_clusters(&mut set).await?;
-
-        let result = sorted_ranges(&set);
-
-        for range in &result {
-            log::debug!("{:?}", range);
-        }
-
-        let max_allocated: u64 = {
-            let rt = self.reftable.read().await;
-            let mut idx = 0;
-
-            while idx < rt.entries() {
-                if rt.get(idx).is_zero() {
-                    break;
-                }
-                idx += 1;
-            }
-
-            ((idx + 1) as u64) << ((info.rb_index_shift as usize) + info.cluster_bits())
-        };
-
-        log::debug!(
-            "start leak check: virt size {:x} max_allocted {:x}",
-            info.virtual_size(),
-            max_allocated
-        );
-        for start in (0..max_allocated).step_by(info.cluster_size()) {
-            let allocated = self.cluster_is_allocated(start).await?;
-            if !allocated {
-                continue;
-            }
-
-            if !Self::is_allocated_cluster_in_use(&result, start >> info.cluster_bits()) {
-                eprintln!(
-                    "cluster {:x}/{} is leaked",
-                    start,
-                    start >> info.cluster_bits()
-                );
-                res = true;
-            }
-        }
-
-        Ok(res)
-    }
-
     pub(crate) async fn cluster_refcount(&self, host_cluster: u64) -> Qcow2Result<u64> {
         let cls = HostCluster(host_cluster);
         let rt_entry = {
@@ -234,46 +171,24 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(rb.get(cls.rb_slice_index(&self.info)).into_plain())
     }
 
-    async fn cluster_is_allocated(&self, host_cluster: u64) -> Qcow2Result<bool> {
-        Ok(self.cluster_refcount(host_cluster).await? != 0)
-    }
-
-    async fn check_cluster(&self, virt_off: u64, host_cluster: u64) -> Qcow2Result<()> {
-        if !self.cluster_is_allocated(host_cluster).await? {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "virt_offset {virt_off:x} points to non-allocated cluster {host_cluster:x}"
-                ),
-            )
-            .into());
-        }
-        Ok(())
-    }
-
-    /// check if every cluster pointed by mapping is valid
-    async fn check_mapping(&self) -> Qcow2Result<()> {
-        let info = &self.info;
-        let end = info.virtual_size();
-
-        for start in (0..end).step_by(info.cluster_size()) {
-            let entry = self.get_l2_entry(start).await?;
-            if let Some((offset, count)) = entry.allocation(info.cluster_bits() as u32) {
-                for cluster in 0..count {
-                    self.check_cluster(start, offset + ((cluster as u64) << info.cluster_bits()))
-                        .await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Check Qcow2 meta integrity and cluster leak
     pub async fn check(&self) -> Qcow2Result<()> {
-        self.check_mapping().await?;
-
-        if self.check_cluster_leak().await? {
-            return Err("check: cluster leak".into());
+        let report = self.check_report().await?;
+        if let Some(mismatch) = report.mismatches.first() {
+            return Err(super::graph::invalid(format!(
+                "Refcount mismatch/leak at host cluster {}: actual {}, expected {}{}",
+                mismatch.host_cluster,
+                mismatch.actual,
+                mismatch.expected,
+                if mismatch.actual == 0 {
+                    " (non-allocated cluster)"
+                } else {
+                    ""
+                }
+            )));
+        }
+        if report.dirty || report.corrupt {
+            return Err(super::graph::invalid("Image needs dirty/corrupt recovery"));
         }
         Ok(())
     }

@@ -675,6 +675,32 @@ impl Qcow2Header {
         self.raw.compression_type
     }
 
+    pub fn incompatible_features(&self) -> u64 {
+        self.raw.incompatible_features
+    }
+    pub fn compatible_features(&self) -> u64 {
+        self.raw.compatible_features
+    }
+    pub(crate) fn set_incompatible_features(&mut self, flags: u64) {
+        self.raw.incompatible_features = flags;
+    }
+    pub(crate) fn set_snapshot_table(&mut self, offset: u64, count: u32) {
+        self.raw.snapshots_offset = offset;
+        self.raw.nb_snapshots = count;
+    }
+    pub(crate) fn set_size(&mut self, size: u64) {
+        self.raw.size = size;
+    }
+    pub(crate) fn extension_data(&self, kind: u32) -> Option<Vec<u8>> {
+        self.extensions.iter().find_map(|e| match e {
+            Qcow2HeaderExtension::Unknown {
+                extension_type,
+                data,
+            } if *extension_type == kind => Some(data.clone()),
+            _ => None,
+        })
+    }
+
     pub fn autoclear_features(&self) -> u64 {
         self.raw.autoclear_features
     }

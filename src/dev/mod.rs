@@ -13,10 +13,12 @@ mod alloc;
 mod cache;
 mod check;
 mod discard;
+mod graph;
 mod info;
 mod read;
 mod write;
 use self::alloc::HostCluster;
+pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};
 
 type L2TableHandle = AsyncRwLock<L2Table>;
