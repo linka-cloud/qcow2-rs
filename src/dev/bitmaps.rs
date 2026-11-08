@@ -161,7 +161,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     name,
                     granularity_bits: granularity,
                     enabled: flags & 2 != 0,
-                    in_use: flags & 1 != 0 || !consistent,
+                    in_use: flags & 1 != 0,
                     consistent: consistent && flags & 1 == 0,
                     extra_data: payload[..extra].to_vec(),
                     extra_data_compatible: flags & 4 != 0,
@@ -213,7 +213,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let mut entry = vec![0; 24];
             put64(&mut entry, 0, table_offset);
             entry[8..12].copy_from_slice(&((table.len() / 8) as u32).to_be_bytes());
-            let flags = u32::from(map.info.in_use)
+            let flags = u32::from(map.info.in_use || !map.info.consistent)
                 | (u32::from(map.info.enabled) << 1)
                 | (u32::from(map.info.extra_data_compatible) << 2);
             entry[12..16].copy_from_slice(&flags.to_be_bytes());

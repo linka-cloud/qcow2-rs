@@ -181,11 +181,14 @@ async fn opaque_extra_data_and_inconsistent_bitmap_management() {
         dev.check_report().await.unwrap().inconsistent_bitmaps,
         vec!["opaque"]
     );
+    // Extension consistency and the per-directory in_use flag are distinct.
+    assert!(!dev.list_bitmaps().await.unwrap()[0].in_use);
     let mut buf = Qcow2IoBuf::<u8>::new(512);
     buf.fill(0x5a);
     assert!(dev.write_at(&buf, 0).await.is_err());
     assert_eq!(std::fs::read(image.path()).unwrap(), bytes);
     dev.set_bitmap_enabled("opaque", false).await.unwrap();
+    assert!(dev.list_bitmaps().await.unwrap()[0].in_use);
     assert!(dev.read_bitmap("opaque").await.is_err());
     dev.clear_bitmap("opaque").await.unwrap();
     assert_eq!(dev.list_bitmaps().await.unwrap()[0].extra_data, b"preserve");
