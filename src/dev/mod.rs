@@ -15,10 +15,12 @@ mod bitmaps;
 mod cache;
 mod check;
 mod compression;
+mod create;
 mod crypto;
 mod discard;
 mod graph;
 mod info;
+mod manage;
 mod read;
 mod repair;
 mod snapshots;
@@ -26,6 +28,10 @@ mod write;
 use self::alloc::HostCluster;
 pub use self::bitmaps::BitmapInfo;
 pub use self::compression::CompressionType;
+pub use self::create::{
+    create_qcow2, BackingFile, BackingFormat, CreateOptions, EncryptionFormat, EncryptionSecret,
+    ExternalDataFile, ImageCapabilities, Preallocation,
+};
 pub use self::crypto::LuksOptions;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};

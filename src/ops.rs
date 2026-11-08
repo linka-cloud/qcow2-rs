@@ -57,8 +57,24 @@ pub(crate) fn set_direct_io(fd: i32) {
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 #[rustversion::attr(since(1.75), allow(async_fn_in_trait))]
 pub trait Qcow2IoOps {
+    /// Reserve physical storage without discarding existing contents.
+    async fn reserve(&self, _offset: u64, _len: usize) -> Qcow2Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Storage reservation is unavailable",
+        )
+        .into())
+    }
     async fn read_to(&self, offset: u64, buf: &mut [u8]) -> Qcow2Result<usize>;
     async fn write_from(&self, offset: u64, buf: &[u8]) -> Qcow2Result<()>;
     async fn fallocate(&self, offset: u64, len: usize, flags: u32) -> Qcow2Result<()>;
     async fn fsync(&self, offset: u64, len: usize, flags: u32) -> Qcow2Result<()>;
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_reserve(fd: i32, offset: u64, len: usize) -> Qcow2Result<()> {
+    let offset = i64::try_from(offset).map_err(|_| "Reservation offset overflow")?;
+    let len = i64::try_from(len).map_err(|_| "Reservation length overflow")?;
+    nix::fcntl::fallocate(fd, nix::fcntl::FallocateFlags::empty(), offset, len)?;
+    Ok(())
 }

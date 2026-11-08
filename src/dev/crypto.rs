@@ -464,14 +464,27 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if h.version() != 3
             || h.crypt_method() != 0
             || h.nb_snapshots() != 0
-            || self.info.external_data()
+            || self.info.raw_data()
         {
-            return Err(invalid("LUKS initialization requires an empty, unencrypted v3 image without snapshots or external data"));
+            return Err(invalid("LUKS initialization requires an empty, unencrypted v3 image without snapshots or raw external data"));
         }
         drop(h);
         self.flush_meta_locked().await?;
         if self.graph().await?.data_mappings.0 != 0 {
             return Err(invalid("Cannot initialize encryption over allocated data"));
+        }
+        if self.info.external_data() {
+            let h = self.header.read().await;
+            if self
+                .read_bytes(h.l1_table_offset(), h.l1_table_entries() * 8)
+                .await?
+                .iter()
+                .any(|b| *b != 0)
+            {
+                return Err(invalid(
+                    "External data mappings must be empty before encryption initialization",
+                ));
+            }
         }
         let (header, cipher) = create_luks(secret.as_ref(), &options)?;
         self.begin_transaction().await?;

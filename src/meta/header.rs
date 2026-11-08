@@ -528,6 +528,108 @@ impl Qcow2Header {
         Ok(header)
     }
 
+    pub(crate) fn initial_metadata(options: &crate::dev::CreateOptions) -> Qcow2Result<Vec<u8>> {
+        options.validate()?;
+        let cs = 1_usize << options.cluster_bits;
+        let l2_entries = cs / if options.extended_l2 { 16 } else { 8 };
+        let entries = options.size.div_ceil(cs as u64 * l2_entries as u64);
+        if entries > u64::from(Self::MAX_L1_SIZE) / 8 {
+            return Err("Virtual size exceeds L1 capacity".into());
+        }
+        let l1_clusters = (entries as usize * 8).div_ceil(cs);
+        let rb_entries = cs * 8 / (1 << options.refcount_order);
+        let (mut rt_clusters, mut rb_clusters) = (1, 1);
+        loop {
+            let total = 1 + rt_clusters + rb_clusters + l1_clusters;
+            let rb = total.div_ceil(rb_entries);
+            let rt = (rb * 8).div_ceil(cs);
+            if (rt, rb) == (rt_clusters, rb_clusters) {
+                break;
+            }
+            rt_clusters = rt;
+            rb_clusters = rb;
+        }
+        if rt_clusters * cs > Self::MAX_REFCOUNT_TABLE_SIZE as usize {
+            return Err("Initial refcount table exceeds capacity".into());
+        }
+        let total = 1 + rt_clusters + rb_clusters + l1_clusters;
+        let mut bytes = vec![0; total * cs];
+        for group in 0..rb_clusters {
+            let offset = (1 + rt_clusters + group) * cs;
+            bytes[cs + group * 8..cs + group * 8 + 8]
+                .copy_from_slice(&(offset as u64).to_be_bytes());
+            let mut block = RefBlock::new(options.refcount_order, cs, Some(offset as u64));
+            for cluster in group * rb_entries..total.min((group + 1) * rb_entries) {
+                block.set_count(cluster % rb_entries, 1)?;
+            }
+            let source = unsafe { std::slice::from_raw_parts(block.as_ptr(), cs) };
+            bytes[offset..offset + cs].copy_from_slice(source);
+        }
+        let mut h = Self {
+            raw: Qcow2RawHeader {
+                magic: Self::QCOW2_MAGIC,
+                version: options.version,
+                cluster_bits: options.cluster_bits as u32,
+                size: options.size,
+                l1_size: entries as u32,
+                l1_table_offset: ((1 + rt_clusters + rb_clusters) * cs) as u64,
+                refcount_table_offset: cs as u64,
+                refcount_table_clusters: rt_clusters as u32,
+                refcount_order: options.refcount_order as u32,
+                header_length: if options.version == 2 { 72 } else { 112 },
+                incompatible_features: if options.extended_l2 { 16 } else { 0 }
+                    | if options.data_file.is_some() { 4 } else { 0 },
+                compatible_features: u64::from(options.lazy_refcounts),
+                autoclear_features: if options.data_file.as_ref().is_some_and(|d| d.raw) {
+                    2
+                } else {
+                    0
+                },
+                ..Default::default()
+            },
+            unknown_header_fields: Vec::new(),
+            backing_filename: None,
+            extensions: Vec::new(),
+        };
+        if let Some(backing) = &options.backing {
+            h.backing_filename = Some(
+                backing
+                    .path
+                    .to_str()
+                    .ok_or("Invalid backing filename")?
+                    .into(),
+            );
+            if let Some(format) = backing.format {
+                h.extensions.push(Qcow2HeaderExtension::BackingFileFormat(
+                    format.as_str().into(),
+                ));
+            }
+        }
+        if let Some(data) = &options.data_file {
+            h.set_extension(
+                0x44415441,
+                Some(
+                    data.path
+                        .to_str()
+                        .ok_or("Invalid data filename")?
+                        .as_bytes()
+                        .to_vec(),
+                ),
+            );
+        }
+        h.set_compression_type(
+            if options.compression == crate::dev::CompressionType::Zstd {
+                1
+            } else {
+                0
+            },
+        );
+        let serialized = h.serialize_to_buf()?;
+        bytes[..serialized.len()].copy_from_slice(&serialized);
+        Self::from_buf(&bytes[..cs])?;
+        Ok(bytes)
+    }
+
     pub fn calculate_meta_params(
         size: u64,
         cluster_bits: usize,

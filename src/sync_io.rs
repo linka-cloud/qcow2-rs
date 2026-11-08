@@ -84,6 +84,11 @@ impl Qcow2IoSync {
 
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 impl Qcow2IoOps for Qcow2IoSync {
+    #[cfg(target_os = "linux")]
+    async fn reserve(&self, offset: u64, len: usize) -> Qcow2Result<()> {
+        crate::ops::linux_reserve(self.fd, offset, len)
+    }
+
     async fn read_to(&self, offset: u64, buf: &mut [u8]) -> Qcow2Result<usize> {
         self.read_at(offset, buf).await
     }
