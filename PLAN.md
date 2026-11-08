@@ -2,15 +2,15 @@
 
 Assessment date: 2026-11-08.
 
-Status: **Phases 1, 2, and 3 complete.** Phase 4 (additional compression,
-encryption, and persistent bitmap management) remains open. See the latest
-checkpoint below for validation and supported limits.
+Status: **Phases 1–4 implemented within the documented limits.** See the latest
+Phase 4 checkpoint below for interoperability, validation, supported encryption
+parameters, and remaining image-management work.
 
 ## Summary and evidence
 
 The initial assessment found core QCOW2 v3 disk I/O and gaps in safe feature
-admission. The implementation now covers Phases 1–3, but does not yet support
-the complete QCOW2 format. Remaining features are tracked in Phase 4.
+admission. The implementation now covers Phases 1–4 within the limits documented
+below. Algorithm/size limits and additional image-management parity remain explicit.
 
 This plan is based on source and existing-test inspection, compared with the
 [QEMU QCOW2 specification](https://www.qemu.org/docs/master/interop/qcow2.html).
@@ -213,6 +213,83 @@ read-only management, all seven refcount widths, lazy interruption, and injected
 snapshot-COW failure followed by repair. Full-suite and lint results are recorded
 in the final validation checkpoint below.
 
+### Phase 4 completion
+
+| Commit | Change |
+| --- | --- |
+| `5f93b0e` | Add maintained Zstd, OpenSSL, and secret-zeroization dependencies |
+| `b01d88a` | Strict Deflate/Zstd readers, packed compressed output, and incompressible fallback |
+| `b8f561b` | LUKS1/legacy AES payload I/O, eight-slot unlocking, native LUKS creation, and secret inputs |
+| `f19ae5a` | Persistent bitmap lifecycle, durable dirty tracking, consistency reporting, and failure recovery |
+| `8e7aa20` | Native codec selection and compressed packing within narrow refcount capacities |
+| `8a99112` | CLI encrypted/Zstd formatting, secret files, compressed writes, and bitmap management/export |
+| `447c540` | Bound untrusted encryption/bitmap fields and verify size-changing bitmap restores |
+| `4e6484a` | Provision OpenSSL development libraries in Linux/i686 and Windows CI |
+| `8cd2193` | Verify direct io_uring, encrypted backing credentials, and packed boundary crossings |
+| `608465d` | Validate pointer alignment and every active LUKS keyslot before credential acceptance |
+| `030e425` | Preserve the distinction between bitmap extension consistency and per-bitmap in-use state |
+| `d4d9f78` | Block bitmap content reads while image metadata recovery is required |
+
+Deflate and Zstd decoding requires a complete stream and exactly one guest
+cluster of output. Packed writes can share sectors and cross host clusters;
+1-/2-/4-bit reference counts limit sharing instead of overflowing. Unsupported
+codec values and compressed encryption/external combinations remain rejected.
+`set_compression_type` selects the format on empty v3 images;
+`write_compressed_at` accepts whole clusters (or a block-aligned final partial
+cluster at virtual EOF), with a 32 MiB batch limit.
+
+Encryption implements QCOW2 LUKS1 and legacy AES. Native initialization on empty
+v3 images writes AES-256-XTS, SHA-256, 4000-stripe AF material, salts, a UUID, and
+an encrypted keyslot before publishing its header pointer. Existing AES-XTS
+(128/256-bit AES keys), AES-CBC (128/192/256-bit keys), plain/plain64 IVs, and
+supported ESSIV hashes are accepted. The payload IV uses physical offsets for
+LUKS and guest offsets for legacy AES. Snapshot VM-state storage uses the same
+payload cryptography. All eight existing keyslots and their storage are preserved
+by normal operations and repair. Wrong LUKS passwords fail before mutation;
+legacy AES cannot verify passwords because its format stores no verifier.
+Secret copies are zeroized and Debug output is redacted; per-image credentials
+support backing chains with distinct passwords.
+
+Supported LUKS KDF/AF hashes are SHA-1, SHA-224/256/384/512, and RIPEMD-160.
+Other ciphers, versions (including LUKS2), and unsupported IV/hash combinations
+fail explicitly. Header/key material is limited to 32 MiB, AF stripes to 65,536,
+and PBKDF2 iterations to 10,000,000. Native creation defaults to 200,000 iterations
+and exposes the iteration count through `LuksOptions`. Keyslot/password amendment
+is not a native API. Legacy AES is compatibility-only, not a creation default.
+Raw external-data consistency is incompatible with encrypted payloads.
+
+Bitmap APIs implement list/create/read/clear/enable/disable/rename/merge/remove,
+plus CLI byte export. Directory fields, tables, flags, padding, and names are
+validated; compatible opaque extra data is preserved and incompatible data is
+not used. Enabled bitmaps are persisted before guest mutations. Writes, zeros,
+discard, and compressed writes mark attempted ranges conservatively; snapshot
+restore resizes all maps and marks the entire new disk in enabled maps. Bitmap
+updates use COW objects and set the old directory's `in_use` flags durably before
+replacement. A failed update blocks further I/O until metadata recovery; bitmap
+inconsistency remains visible after refcount repair and requires an explicit
+reset/disable/removal. Native tracking preserves the bitmap autoclear flag.
+QEMU-compatible bitmap granularity is limited to 9–31 bits and each bitmap's
+expanded data to 32 MiB; directory/table limits remain 32 MiB.
+
+Validation includes QEMU check/compare, ordinary/extended-L2 codec fixtures,
+sector sharing and host-boundary crossings, long-distance Deflate references,
+incompressible fallback, narrow refcounts, malformed/truncated/oversized streams,
+QEMU/native LUKS headers, AES-XTS/CBC-ESSIV/legacy AES, encrypted snapshots/VM
+state, malformed keyslot parameters, wrong/missing secrets, native/QEMU bitmap
+merges and writes, opaque extra data, bitmap save failure, read-only management,
+and size-changing snapshot restore. A combined io_uring test covers encrypted
+and Zstd payloads with bitmap tracking under 4 KiB direct I/O and reopen.
+
+The implementation follows the [QCOW2 format specification](https://www.qemu.org/docs/master/interop/qcow2.html),
+with cryptographic interoperability checked against
+[QEMU’s LUKS1 implementation](https://github.com/qemu/qemu/blob/master/crypto/block-luks.c)
+and [legacy AES implementation](https://github.com/qemu/qemu/blob/master/crypto/block-qcow.c). OpenSSL supplies AES, hashes, PBKDF2, randomness, and constant-time
+key-digest comparison.
+Serialized COW/refcount rebuilding and eager bitmap persistence prioritize
+ordering over throughput and can grow sparse images. Native advanced-layout
+formatting, resize/rebase/commit/amend/preallocation, keyslot amendment, additional
+cipher families, and a new non-Linux runtime validation matrix remain separate.
+
 ## Baseline feature coverage (before Phase 1)
 
 | Feature | Current implementation |
@@ -362,31 +439,31 @@ implementations; snapshot data remains unchanged after active-image writes.
 
 ### Compression
 
-- [ ] Recognize the compression-type incompatible feature and implement Zstd
+- [x] Recognize the compression-type incompatible feature and implement Zstd
       decompression alongside the existing Deflate reader.
-- [ ] Add Deflate and Zstd compressed output with packed extent allocation,
+- [x] Add Deflate and Zstd compressed output with packed extent allocation,
       correct refcounts, and uncompressed fallback when compression does not fit.
-- [ ] Validate decompression completion/output size and malformed streams.
-- [ ] Test packed extents sharing sectors and crossing host-cluster boundaries.
+- [x] Validate decompression completion/output size and malformed streams.
+- [x] Test packed extents sharing sectors and crossing host-cluster boundaries.
 
 ### Encryption
 
-- [ ] Add explicit key/secret inputs and cryptographic payload I/O.
-- [ ] Implement the LUKS header-pointer extension and associated header/key data.
-- [ ] Implement legacy AES compatibility if claiming all specified encryption
+- [x] Add explicit key/secret inputs and cryptographic payload I/O.
+- [x] Implement the LUKS header-pointer extension and associated header/key data.
+- [x] Implement legacy AES compatibility if claiming all specified encryption
       methods; document its legacy status and do not make it a creation default.
-- [ ] Include encryption metadata in allocation accounting and checking.
-- [ ] Validate wrong/missing keys and unsupported encryption parameters without
+- [x] Include encryption metadata in allocation accounting and checking.
+- [x] Validate wrong/missing keys and unsupported encryption parameters without
       exposing secrets in errors or logs.
 
 ### Persistent dirty bitmaps
 
-- [ ] Parse/preserve bitmap directories, tables, data, flags, and extra data.
-- [ ] Add bitmap lifecycle operations and change tracking for writes, zeros,
+- [x] Parse/preserve bitmap directories, tables, data, flags, and extra data.
+- [x] Add bitmap lifecycle operations and change tracking for writes, zeros,
       discard, snapshot switching, and virtual-size changes as applicable.
-- [ ] Implement `in_use`, enabled/auto, and autoclear consistency behavior.
+- [x] Implement `in_use`, enabled/auto, and autoclear consistency behavior.
 - [x] Include bitmap storage in refcount checking and repair. Directory/table
-      traversal preserves storage; lifecycle/change tracking remains Phase 4.
+      traversal and native tracking preserve consistent bitmap storage.
 
 Acceptance: codec output, encrypted payloads, and persisted bitmap contents
 interoperate with QEMU; interrupted updates are detected through consistency
@@ -398,12 +475,15 @@ state rather than silently treated as valid.
       errors; replace blanket incompatible-feature rejection incrementally as
       each feature becomes operational.
 - [ ] Extend open/create options for backing formats, external data files,
-      compression, encryption credentials, and format version.
-- [ ] Add snapshot, bitmap, explicit zero-write, and check/repair interfaces as
+      compression, encryption credentials, and format version. External-path and
+      secret options, native codec selection, and LUKS initialization are complete;
+      native formatting remains basic v3 (advanced layout creation/version
+      selection is still a separate interface task).
+- [x] Add snapshot, bitmap, explicit zero-write, and check/repair interfaces as
       their implementations land; extend the CLI for those capabilities.
-- [ ] Document flush/durability requirements and failure behavior. Dirty cache
+- [x] Document flush/durability requirements and failure behavior. Dirty cache
       contents must not be described as automatically persisted on drop.
-- [ ] Publish a feature matrix distinguishing read, write, create, management,
+- [x] Publish a feature matrix distinguishing read, write, create, management,
       recovery, and tested interoperability support.
 
 Preserve existing ordinary-image APIs where practical. Add explicit operations
@@ -440,6 +520,22 @@ behavior during open.
 - The previously recorded all-target Clippy failures in older unchanged test
   helpers remain outside this work. This checkpoint verifies the Linux runtime;
   it does not claim a new FreeBSD/macOS/Windows execution matrix.
+
+## Final Phase 4 validation checkpoint
+
+- `cargo test --quiet`: **130 passed, 0 failed**, including the combined
+  io_uring/direct-I/O Phase 4 regression.
+- `cargo fmt --check` and `git diff --check`: passed.
+- `cargo clippy --lib --bin rqcow2 --test compression --test encryption
+  --test bitmaps --test phase4_backends --test autoclear --test management_cli
+  --no-deps`: passed with warnings.
+- Local QEMU 8.2.2 check/compare, bitmap merge/write, and native LUKS/codec
+  interoperability fixtures pass. Feature-dependent QEMU fixtures gate on the
+  fixture tool's supported options so older tools can run the remaining tests.
+- Linux Tokio, synchronous/direct I/O, and io_uring/direct I/O are exercised.
+  Windows and i686 CI dependency provisioning is updated but was not executed
+  locally. Earlier all-target Clippy failures in unchanged legacy test helpers
+  remain outside this checkpoint.
 
 ## Additional image-management parity
 

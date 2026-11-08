@@ -12,13 +12,16 @@ linux sync IO syscall, tokio and io-uring[^3] with smol[^2] runtime
 - support both direct IO and buffered IO, for direct IO, it needs async
 runtime support, such as tokio doesn't allow it.
 
-- v2/v3 read/write, QCOW2/raw backing chains, and Deflate-compressed reads
+- v2/v3 read/write, QCOW2/raw backing chains, and Deflate/Zstd compressed I/O
 
 - internal snapshot management with disk/VM-state preservation, extended L2
 subclusters, external payload files, and precise zero writes
 
 - exact refcount checking and explicit repair, including dirty/lazy-refcount
 recovery, snapshots, and persistent bitmap storage
+
+- LUKS1 and legacy AES payload encryption, native LUKS creation, and persistent
+dirty bitmap management and change tracking
 
 - l2 table & refcount block load & store in slice way, and the minimized
 slice size is block size, and the maximized size is cluster size
@@ -63,9 +66,10 @@ limits, validation results, and remaining work.
 | Extended L2 subclusters | Yes, including compressed reads | Open QEMU-created images | Yes |
 | External data files, including raw mode | Yes | Open QEMU-created images; caller path override | Metadata refcounts |
 | Lazy refcounts | Yes, durable dirty-state tracking | Open existing images | Explicit recovery |
-| Deflate compression | Read; overwrite becomes uncompressed | Compressed output pending | Extent accounting |
-| Persistent bitmaps | Stored metadata preserved; consistency invalidated before untracked changes | Tracking/lifecycle pending | Storage accounted for |
-| Zstd and encryption | Unsupported; rejected | Pending | Pending |
+| Deflate/Zstd compression | Strict reads; ordinary or compressed writes | Native codec selection on empty v3 images | Packed extent accounting |
+| LUKS1 encryption | AES-XTS/CBC, plain/plain64/ESSIV IVs | Native AES-256-XTS creation; existing keyslots preserved | Encryption storage accounted for |
+| Legacy AES encryption | Compatibility reads/writes | No native creation default | No password verifier in this format |
+| Persistent bitmaps | Durable dirty tracking, including snapshot restore | List/create/clear/enable/disable/rename/merge/remove/export | Storage and consistency checked |
 
 `dev.write_zeroes(offset, length)` guarantees zero reads. Advisory discard can
 reveal backing bytes and skips compressed mappings. Extended-L2 discard rounds
@@ -104,11 +108,80 @@ rqcow2 snapshot disk.qcow2 delete saved
 rqcow2 zero disk.qcow2 0 4096
 ```
 
-Shared/snapshot, extended-L2, and external writes currently serialize I/O and
-rebuild refcounts after each operation. This prioritizes durable metadata
+Shared/snapshot, extended-L2, external, encrypted, compressed, and bitmap-tracked
+writes currently serialize I/O and rebuild refcounts after each operation. This prioritizes durable metadata
 ordering and can increase latency and sparse-file growth. Ordinary images keep
 the existing cached write path. Flush excludes guest writes so lazy dirty state
 is cleared only after active writes and metadata are synchronized.
+
+## Compression, encryption, and bitmaps
+
+`dev.set_compression_type(CompressionType::Zstd).await?` selects the codec before
+allocating guest storage; `Deflate` is the default. Both types are exported from
+`qcow2_rs::dev`. Use `write_compressed_at(buf, offset)` for whole clusters, or a
+block-aligned final partial cluster at virtual EOF, in batches up to 32 MiB.
+Streams share sectors and host clusters; packing respects the refcount width.
+Incompressible clusters use ordinary storage. Ordinary `write_at` overwrites
+compressed mappings with uncompressed COW storage. Compression is incompatible
+with encrypted payloads and external data files.
+
+For encrypted opening, call `params.set_encryption_secret(password_bytes)`.
+`set_image_encryption_secret(path, password_bytes)?` supplies a distinct password
+for an image in a backing chain. Secret copies are zeroized on drop and redacted
+from parameter Debug output. For a new empty v3 image, call
+`dev.initialize_luks(password_bytes, LuksOptions::default()).await?` before guest
+writes. Native creation uses AES-256-XTS, SHA-256, 4000 AF stripes, and 200,000
+PBKDF2 iterations. `LuksOptions` exposes the iteration count.
+
+Existing LUKS1 AES-XTS (128/256-bit AES keys) and AES-CBC (128/192/256-bit keys)
+are supported, including plain, plain64, and supported ESSIV IVs. Keyslot KDF/AF
+hashes include SHA-1, SHA-224/256/384/512, and RIPEMD-160. Unsupported ciphers,
+LUKS versions, and IV/hash combinations return errors. Header/key material is
+limited to 32 MiB, AF stripes to 65,536, and PBKDF2 iterations to 10,000,000.
+The existing eight keyslots are preserved; keyslot/password amendment is not a
+native management interface. Legacy AES is provided for compatibility, has no
+password verifier, and is not a creation default. Encryption covers payloads;
+QCOW2 metadata stays plaintext.
+
+`create_bitmap(name, granularity_bits, enabled)` creates a dirty bitmap. Other
+methods are `list_bitmaps`, `read_bitmap`, `clear_bitmap`, `set_bitmap_enabled`,
+`rename_bitmap`, `merge_bitmap`, and `remove_bitmap`. Bitmap bytes use least
+significant bit first. Supported granularities are 9–31 bits (512 bytes–2 GiB),
+with at most 32 MiB of data per bitmap. Compatible opaque extra data is preserved;
+incompatible extra data prevents use of that bitmap.
+
+Enabled bitmaps are saved before guest writes, zeroing, or discard. Snapshot
+restore resizes every bitmap and marks the entire restored disk in enabled
+bitmaps. Failed writes may leave conservative extra dirty bits. Interrupted
+bitmap saves leave an `in_use` marker; inconsistent enabled bitmaps block guest
+changes until explicitly cleared, disabled, or removed. Refcount repair preserves
+this marker and does not manufacture missing bitmap contents. Clearing an
+inconsistent bitmap explicitly starts a new tracking baseline.
+
+```sh
+rqcow2 format --compression zstd disk.qcow2
+rqcow2 compress disk.qcow2 cluster-data.raw --offset 0
+rqcow2 --secret-file passphrase.bin format --luks encrypted.qcow2
+rqcow2 --secret-file passphrase.bin check encrypted.qcow2
+rqcow2 bitmap disk.qcow2 create tracking --granularity-bits 16
+rqcow2 bitmap disk.qcow2 list
+rqcow2 bitmap disk.qcow2 export tracking tracking.bits
+rqcow2 bitmap disk.qcow2 clear tracking
+rqcow2 bitmap disk.qcow2 disable tracking
+rqcow2 bitmap disk.qcow2 remove tracking
+```
+
+`--secret-file` is global and applies to check/repair, info/map, snapshots,
+bitmaps, zero writes, and QCOW2-to-raw conversion. File bytes are used verbatim;
+trailing newlines are part of the password. Bitmap tracking and compressed or
+encrypted writes use the serialized COW/refcount rebuild path described above.
+
+Building requires a C compiler and OpenSSL development libraries. On Debian or
+Ubuntu, install `pkg-config libssl-dev`; on Windows/MSVC, install OpenSSL through
+vcpkg (for example `openssl:x64-windows-static-md`) and set `VCPKG_ROOT` to its
+installation. See the [OpenSSL build instructions](https://docs.rs/openssl/latest/openssl/#building)
+for other platforms. Zstd is built through its Rust dependency. CI provisions native
+OpenSSL for Linux/i686 and Windows; only the Linux execution was verified locally.
 
 ## Example
 
