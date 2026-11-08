@@ -171,6 +171,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 "Resized disk exceeds supported mapping capacity",
             ));
         }
+        if self
+            .snapshot_directory()
+            .await?
+            .0
+            .iter()
+            .any(|s| s.extra_data.len() < 16)
+        {
+            return Err(super::graph::invalid(
+                "Resize requires snapshot disk sizes; amend to v3 first",
+            ));
+        }
         let mut maps = self.load_bitmaps().await?;
         self.begin_transaction().await?;
         let result = async {

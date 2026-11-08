@@ -304,3 +304,53 @@ async fn external_name_amendment_uses_the_attached_storage() {
     drop(dev);
     check(&path);
 }
+
+#[tokio::test]
+async fn old_v2_snapshots_gain_explicit_disk_sizes_before_resize() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old-v2");
+    let options = CreateOptions {
+        version: 2,
+        size: 1 << 20,
+        ..Default::default()
+    };
+    create_qcow2(&path, &options).await.unwrap();
+    let dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+        .await
+        .unwrap();
+    dev.create_snapshot(
+        SnapshotOptions {
+            id: "old".into(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    drop(dev);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let offset = u64::from_be_bytes(bytes[64..72].try_into().unwrap()) as usize;
+    // A v2 snapshot with no extra data inherits the current header's disk size.
+    bytes[offset + 36..offset + 40].fill(0);
+    bytes[offset + 40..offset + 43].copy_from_slice(b"old");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+        .await
+        .unwrap();
+    assert!(dev.resize(2 << 20, false).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    dev.amend(AmendOptions {
+        version: Some(3),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    dev.resize(2 << 20, false).await.unwrap();
+    let snapshots = dev.list_snapshots().await.unwrap();
+    assert_eq!(snapshots[0].disk_size, 1 << 20);
+    assert!(snapshots[0].extra_data.len() >= 16);
+    dev.restore_snapshot("old").await.unwrap();
+    assert_eq!(dev.info.virtual_size(), 1 << 20);
+    dev.check().await.unwrap();
+    check(&path);
+}

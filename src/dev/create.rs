@@ -119,7 +119,8 @@ impl CreateOptions {
                 "Incompatible external/raw/compression/encryption creation options",
             ));
         }
-        if self.open_params.is_direct_io()
+        if self.open_params.external_data_file().is_some()
+            || self.open_params.is_direct_io()
             || self.open_params.is_read_only()
             || !(9..=12).contains(&self.open_params.get_bs_bits())
             || self.open_params.get_bs_bits() > self.cluster_bits

@@ -221,6 +221,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                         version,
                     )
                     .await?;
+                if version == 3 && snapshot.extra_data.len() < 16 {
+                    snapshot.extra_data.resize(16, 0);
+                    snapshot.extra_data[..8].copy_from_slice(&snapshot.vm_state_size.to_be_bytes());
+                    snapshot.extra_data[8..16].copy_from_slice(&snapshot.disk_size.to_be_bytes());
+                }
                 snapshot.l1_offset = host;
                 snapshot.l1_entries = entries as u32;
             }
