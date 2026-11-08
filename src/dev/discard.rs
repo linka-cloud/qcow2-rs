@@ -55,6 +55,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if start >= stop {
             return Ok(());
         }
+        self.prepare_writable().await?;
 
         log::trace!(
             "discard guest [{:x}, {:x}) -> whole-cluster [{:x}, {:x})",

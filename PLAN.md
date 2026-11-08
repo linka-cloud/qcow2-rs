@@ -91,9 +91,9 @@ Address these before advertising broader feature support:
       COW is safe. Existing L2 tables are reused without shared-table COW, and
       replacing a shared data mapping lacks a general path to preserve untouched
       bytes. Read-only access to the active image must remain separately tested.
-- [ ] Implement autoclear handling before writes can invalidate unsupported
-      metadata. The current clearing code is commented out, so bitmap consistency
-      flags can remain set after untracked modifications.
+- [x] Implement autoclear handling before writes can invalidate unsupported
+      metadata. Clear flags durably before the first write/discard, retain them
+      for reads, and prevent mutation if invalidation fails.
 - [ ] Fix discard semantics with backing files: clearing an L2 mapping exposes
       backing data and does not guarantee zero reads. Document discard behavior
       accurately and keep explicit zero-write semantics separate.

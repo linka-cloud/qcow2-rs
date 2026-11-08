@@ -9,6 +9,34 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
+    /// Invalidate unsupported autoclear metadata durably before any mutation.
+    /// Keep the in-memory flags until fsync succeeds so a failed attempt can
+    /// be retried without allowing guest I/O through the barrier.
+    pub(crate) async fn prepare_writable(&self) -> Qcow2Result<()> {
+        if self.info.is_read_only() {
+            return Err("Attempt to modify a read-only qcow2 image".into());
+        }
+        if self.header.read().await.autoclear_features() == 0 {
+            return Ok(());
+        }
+        let mut header = self.header.write().await;
+        if header.autoclear_features() == 0 {
+            return Ok(());
+        }
+
+        // Update only the flags in an aligned first-block read/modify/write.
+        // This also preserves unknown extensions and supports O_DIRECT.
+        let mut buf = crate::helpers::Qcow2IoBuf::<u8>::new(1 << self.info.block_size_shift);
+        if self.call_read(0, &mut buf).await? != buf.len() {
+            return Err("Short read while clearing qcow2 autoclear features".into());
+        }
+        buf[88..96].fill(0);
+        self.call_write(0, &buf).await?;
+        self.call_fsync(0, buf.len(), 0).await?;
+        header.clear_autoclear_features();
+        Ok(())
+    }
+
     #[inline]
     pub(crate) async fn call_read(&self, offset: u64, buf: &mut [u8]) -> Qcow2Result<usize> {
         log::trace!("read_to off {:x} len {}", offset, buf.len());

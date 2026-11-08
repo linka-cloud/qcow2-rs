@@ -628,6 +628,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if info.is_read_only() {
             return Err("write_at: write to read-only image".into());
         }
+        self.prepare_writable().await?;
 
         if single {
             let l2_entry = self.populate_single_write_mapping(offset).await?;

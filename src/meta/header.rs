@@ -400,14 +400,6 @@ impl Qcow2Header {
             extensions,
         };
 
-        // No need to clear autoclear features for read-only images, and it is caller's
-        // responsibility to clear the feature bit
-        /*
-        if header.raw.autoclear_features != 0 && !read_only {
-            header.raw.autoclear_features = 0;
-            header.write(queue).await?;
-        }*/
-
         if header.raw.incompatible_features != 0 {
             let feats = (0..64)
                 .filter(|bit| header.raw.incompatible_features & (1u64 << bit) != 0)
@@ -600,6 +592,14 @@ impl Qcow2Header {
 
     pub fn compression_type(&self) -> u8 {
         self.raw.compression_type
+    }
+
+    pub fn autoclear_features(&self) -> u64 {
+        self.raw.autoclear_features
+    }
+
+    pub(crate) fn clear_autoclear_features(&mut self) {
+        self.raw.autoclear_features = 0;
     }
 
     pub fn header_length(&self) -> u32 {
