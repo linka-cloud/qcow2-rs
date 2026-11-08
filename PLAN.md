@@ -58,7 +58,7 @@ Address these before advertising broader feature support:
 - [x] Reject encrypted images explicitly until cryptographic I/O is implemented.
       `crypt_method` is currently parsed/displayed, but payload reads and writes
       never encrypt or decrypt.
-- [ ] Reject writable snapshot-bearing images until shared metadata and data
+- [x] Reject writable snapshot-bearing images until shared metadata and data
       COW is safe. Existing L2 tables are reused without shared-table COW, and
       replacing a shared data mapping lacks a general path to preserve untouched
       bytes. Read-only access to the active image must remain separately tested.

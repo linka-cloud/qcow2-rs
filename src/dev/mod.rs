@@ -80,6 +80,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             )
             .into());
         }
+        if h.nb_snapshots() != 0 && !params.is_read_only() {
+            return Err("Writable qcow2 images with internal snapshots are not supported".into());
+        }
         let bs_shift = params.get_bs_bits();
 
         debug_assert!((9..=12).contains(&bs_shift));
