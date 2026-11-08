@@ -60,6 +60,59 @@ pub struct ZeroArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct BitmapArgs {
+    file: PathBuf,
+    #[command(subcommand)]
+    action: BitmapAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BitmapAction {
+    List,
+    Create {
+        name: String,
+        #[arg(long, default_value_t = 16)]
+        granularity_bits: u8,
+        #[arg(long)]
+        disabled: bool,
+    },
+    Remove {
+        name: String,
+    },
+    Clear {
+        name: String,
+    },
+    Enable {
+        name: String,
+    },
+    Disable {
+        name: String,
+    },
+    Rename {
+        name: String,
+        new_name: String,
+    },
+    Merge {
+        name: String,
+        source: String,
+    },
+    /// Export bitmap bytes (least significant bit first within each byte)
+    Export {
+        name: String,
+        output: PathBuf,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct CompressArgs {
+    file: PathBuf,
+    /// Raw bytes for complete guest clusters, at most 32 MiB
+    input: PathBuf,
+    #[arg(long, default_value_t = 0, value_parser=maybe_hex::<u64>)]
+    offset: u64,
+}
+
+#[derive(Args, Debug)]
 pub struct InfoArgs {
     /// qcow2 image path
     file: PathBuf,
@@ -85,6 +138,12 @@ pub struct MapArgs {
 
 #[derive(Args, Debug)]
 pub struct FormatArgs {
+    /// Compression format for compressed writes
+    #[arg(long, default_value = "zlib", value_parser = ["zlib", "zstd"])]
+    compression: String,
+    /// Create a LUKS-encrypted image using --secret-file
+    #[arg(long)]
+    luks: bool,
     /// virtual size, unit is MB
     #[clap(long, short = 's', default_value_t = 64)]
     size: u32,
@@ -171,6 +230,12 @@ pub enum Commands {
     /// Write zeros to an aligned guest range
     Zero(ZeroArgs),
 
+    /// Manage persistent dirty bitmaps
+    Bitmap(BitmapArgs),
+
+    /// Write raw input using the image's compression format
+    Compress(CompressArgs),
+
     /// Map qcow2 virtual address into host cluster offset (for development only, may be removed in future)
     Map(MapArgs),
 
@@ -181,6 +246,9 @@ pub enum Commands {
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// File containing the encryption passphrase (read verbatim, without trimming)
+    #[arg(long, global = true)]
+    secret_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -455,7 +523,12 @@ fn __format_qcow2_buf(size: u64, cluster_bits: usize, refcount_order: u8, bs: us
     buf
 }
 
-fn format_qcow2(args: FormatArgs) -> Qcow2Result<()> {
+fn format_qcow2(args: FormatArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
+    if args.luks && (secret.is_none() || args.compression != "zlib") {
+        return Err(
+            "LUKS creation requires --secret-file and the default compression setting".into(),
+        );
+    }
     let size = (args.size as u64) << 20;
     let cluster_bits = args.cluster_bits;
     let refcount_order = args.refcount_order;
@@ -473,15 +546,29 @@ fn format_qcow2(args: FormatArgs) -> Qcow2Result<()> {
 
         assert!(res == buf.len());
     }
-    dump_header(&args.file).unwrap();
+    if args.luks || args.compression == "zstd" {
+        Runtime::new()?.block_on(async {
+            let params = image_params(false, false, None);
+            let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+            if args.luks {
+                dev.initialize_luks(secret.unwrap(), qcow2_rs::dev::LuksOptions::default())
+                    .await?;
+            } else {
+                dev.set_compression_type(qcow2_rs::dev::CompressionType::Zstd)
+                    .await?;
+            }
+            Ok::<(), qcow2_rs::error::Qcow2Error>(())
+        })?;
+    }
+    dump_header(&args.file)?;
 
     Ok(())
 }
 
-fn map_qcow2(args: MapArgs) -> Qcow2Result<()> {
+fn map_qcow2(args: MapArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
-        let p = qcow2_rs::qcow2_default_params!(false, false);
+        let p = image_params(false, false, secret);
         let dev = qcow2_setup_dev_tokio(&args.file, &p).await.unwrap();
         let cls_bits = dev.info.cluster_bits();
         let mut start = args.addr & (!((1 << cls_bits) - 1) as u64);
@@ -502,10 +589,10 @@ fn map_qcow2(args: MapArgs) -> Qcow2Result<()> {
     Ok(())
 }
 
-fn info_qcow2(args: InfoArgs) -> Qcow2Result<()> {
+fn info_qcow2(args: InfoArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
-        let p = qcow2_rs::qcow2_default_params!(true, false);
+        let p = image_params(true, false, secret);
         let dev = qcow2_setup_dev_tokio(&args.file, &p).await.unwrap();
         let info = &dev.info;
         println!("{:?}", dev);
@@ -584,11 +671,11 @@ fn info_qcow2(args: InfoArgs) -> Qcow2Result<()> {
     Ok(())
 }
 
-fn check_qcow2(args: CheckArgs) -> Qcow2Result<()> {
+fn check_qcow2(args: CheckArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     let rt = Runtime::new().unwrap();
 
     rt.block_on(async move {
-        let mut p = qcow2_rs::qcow2_default_params!(!args.repair, false);
+        let mut p = image_params(!args.repair, false, secret);
         p.set_repair_mode(args.repair);
         let dev = qcow2_setup_dev_tokio(&args.file, &p).await?;
         if args.repair {
@@ -685,11 +772,11 @@ fn convert_to_qcow2_prep(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn convert_from_qcow2(qcow2: &Path, raw: &Path) -> Qcow2Result<()> {
+fn convert_from_qcow2(qcow2: &Path, raw: &Path, secret: Option<&[u8]>) -> Qcow2Result<()> {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {
-        let p = qcow2_rs::qcow2_default_params!(false, false);
+        let p = image_params(true, false, secret);
         let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p)
             .await
             .unwrap();
@@ -699,9 +786,9 @@ fn convert_from_qcow2(qcow2: &Path, raw: &Path) -> Qcow2Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn convert_from_qcow2(qcow2: &Path, raw: &Path) -> Qcow2Result<()> {
+fn convert_from_qcow2(qcow2: &Path, raw: &Path, secret: Option<&[u8]>) -> Qcow2Result<()> {
     tokio_uring::start(async {
-        let p = qcow2_rs::qcow2_default_params!(false, true);
+        let p = image_params(true, true, secret);
         let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p)
             .await
             .unwrap();
@@ -717,7 +804,7 @@ fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {
-        let p = qcow2_rs::qcow2_default_params!(false, false);
+        let p = image_params(false, false, None);
         let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p)
             .await
             .unwrap();
@@ -731,7 +818,7 @@ fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
     convert_to_qcow2_prep(raw, qcow2)?;
 
     tokio_uring::start(async {
-        let p = qcow2_rs::qcow2_default_params!(false, true);
+        let p = image_params(false, true, None);
         let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p)
             .await
             .unwrap();
@@ -741,7 +828,7 @@ fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
     Ok(())
 }
 
-fn __convert_qcow2(args: ConvertArgs) -> Qcow2Result<()> {
+fn __convert_qcow2(args: ConvertArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     let in_fmt = &args.fmt;
     let out_fmt = &args.output_fmt;
 
@@ -750,7 +837,7 @@ fn __convert_qcow2(args: ConvertArgs) -> Qcow2Result<()> {
     }
 
     if in_fmt == "qcow2" && out_fmt == "raw" {
-        convert_from_qcow2(&args.file, &args.output_file)?;
+        convert_from_qcow2(&args.file, &args.output_file, secret)?;
     } else if in_fmt == "raw" && out_fmt == "qcow2" {
         convert_to_qcow2(&args.file, &args.output_file)?;
     } else {
@@ -760,17 +847,17 @@ fn __convert_qcow2(args: ConvertArgs) -> Qcow2Result<()> {
     Ok(())
 }
 
-fn convert_qcow2(args: ConvertArgs) -> Qcow2Result<()> {
-    __convert_qcow2(args)
+fn convert_qcow2(args: ConvertArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
+    __convert_qcow2(args, secret)
 }
 
-fn snapshot_qcow2(args: SnapshotArgs) -> Qcow2Result<()> {
+fn snapshot_qcow2(args: SnapshotArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     Runtime::new()?.block_on(async {
         let read_only = matches!(
             args.action,
             SnapshotAction::List | SnapshotAction::VmState { .. }
         );
-        let params = qcow2_rs::qcow2_default_params!(read_only, false);
+        let params = image_params(read_only, false, secret);
         let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
         match args.action {
             SnapshotAction::List => {
@@ -817,16 +904,92 @@ fn snapshot_qcow2(args: SnapshotArgs) -> Qcow2Result<()> {
     })
 }
 
-fn zero_qcow2(args: ZeroArgs) -> Qcow2Result<()> {
+fn zero_qcow2(args: ZeroArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
     Runtime::new()?.block_on(async {
-        let params = qcow2_rs::qcow2_default_params!(false, false);
+        let params = image_params(false, false, secret);
         let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
         dev.write_zeroes(args.offset, args.length).await
     })
 }
 
-fn main() {
+fn bitmap_qcow2(args: BitmapArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
+    Runtime::new()?.block_on(async {
+        let read_only = matches!(
+            args.action,
+            BitmapAction::List | BitmapAction::Export { .. }
+        );
+        let params = image_params(read_only, false, secret);
+        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        match args.action {
+            BitmapAction::List => {
+                println!("NAME\tGRANULARITY BITS\tENABLED\tCONSISTENT\tIN USE");
+                for bitmap in dev.list_bitmaps().await? {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        bitmap.name,
+                        bitmap.granularity_bits,
+                        bitmap.enabled,
+                        bitmap.consistent,
+                        bitmap.in_use
+                    );
+                }
+            }
+            BitmapAction::Create {
+                name,
+                granularity_bits,
+                disabled,
+            } => {
+                dev.create_bitmap(&name, granularity_bits, !disabled)
+                    .await?
+            }
+            BitmapAction::Remove { name } => dev.remove_bitmap(&name).await?,
+            BitmapAction::Clear { name } => dev.clear_bitmap(&name).await?,
+            BitmapAction::Enable { name } => dev.set_bitmap_enabled(&name, true).await?,
+            BitmapAction::Disable { name } => dev.set_bitmap_enabled(&name, false).await?,
+            BitmapAction::Rename { name, new_name } => dev.rename_bitmap(&name, &new_name).await?,
+            BitmapAction::Merge { name, source } => dev.merge_bitmap(&name, &source).await?,
+            BitmapAction::Export { name, output } => {
+                let bytes = dev.read_bitmap(&name).await?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(output)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn compress_qcow2(args: CompressArgs, secret: Option<&[u8]>) -> Qcow2Result<()> {
+    if std::fs::metadata(&args.input)?.len() > 32 << 20 {
+        return Err("Compressed batch exceeds 32 MiB".into());
+    }
+    let bytes = std::fs::read(args.input)?;
+    Runtime::new()?.block_on(async {
+        let params = image_params(false, false, secret);
+        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        dev.write_compressed_at(&bytes, args.offset).await
+    })
+}
+
+fn image_params(read_only: bool, direct: bool, secret: Option<&[u8]>) -> Qcow2DevParams {
+    let mut params = Qcow2DevParams::new(9, None, None, read_only, direct);
+    if let Some(secret) = secret {
+        params.set_encryption_secret(secret);
+    }
+    params
+}
+
+fn main() -> Qcow2Result<()> {
     let cli = Cli::parse();
+    let secret = cli
+        .secret_file
+        .map(std::fs::read)
+        .transpose()?
+        .map(zeroize::Zeroizing::new);
+    let secret = secret.as_ref().map(|s| s.as_slice());
 
     env_logger::builder()
         .format_target(false)
@@ -834,13 +997,15 @@ fn main() {
         .init();
 
     match cli.command {
-        Commands::Dump(arg) => dump_qcow2(arg).unwrap(),
-        Commands::Format(arg) => format_qcow2(arg).unwrap(),
-        Commands::Map(arg) => map_qcow2(arg).unwrap(),
-        Commands::Info(arg) => info_qcow2(arg).unwrap(),
-        Commands::Check(arg) => check_qcow2(arg).unwrap(),
-        Commands::Snapshot(arg) => snapshot_qcow2(arg).unwrap(),
-        Commands::Zero(arg) => zero_qcow2(arg).unwrap(),
-        Commands::Convert(arg) => convert_qcow2(arg).unwrap(),
-    };
+        Commands::Dump(arg) => dump_qcow2(arg),
+        Commands::Format(arg) => format_qcow2(arg, secret),
+        Commands::Map(arg) => map_qcow2(arg, secret),
+        Commands::Info(arg) => info_qcow2(arg, secret),
+        Commands::Check(arg) => check_qcow2(arg, secret),
+        Commands::Snapshot(arg) => snapshot_qcow2(arg, secret),
+        Commands::Zero(arg) => zero_qcow2(arg, secret),
+        Commands::Bitmap(arg) => bitmap_qcow2(arg, secret),
+        Commands::Compress(arg) => compress_qcow2(arg, secret),
+        Commands::Convert(arg) => convert_qcow2(arg, secret),
+    }
 }
