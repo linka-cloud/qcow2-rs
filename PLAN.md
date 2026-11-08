@@ -150,6 +150,9 @@ Address these before advertising broader feature support:
       TODO in refcount-table growth and the short-allocation FIXME in L1 growth.
       L1 clones now size storage in bytes, zero new entries, advertise the
       requested entry count, and mark every relocated block for writing.
+      L1 relocation now requires an exact contiguous range, releases short
+      candidates, and retries the next refblock. Allocations spanning refblock
+      boundaries and refcount-table relocation still need work.
 
 Acceptance: unsupported images fail before mutation; supported images preserve
 unmodified bytes and metadata across writes, discard, flush, and reopen.

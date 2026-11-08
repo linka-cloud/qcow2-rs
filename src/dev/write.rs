@@ -50,22 +50,15 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
                 let mut new_l1_table = l1_table.clone_and_grow(l1_index, info.cluster_size());
                 let new_l1_clusters = new_l1_table.cluster_count(info);
-                let allocated = self.allocate_clusters(new_l1_clusters).await?;
+                let (new_offset, _) = self.allocate_clusters_exact(new_l1_clusters).await?;
 
-                // fixme: allocated may return less clusters, here has to cover this
-                // case
-                match allocated {
-                    None => return Err("nothing allocated for new l1 table".into()),
-                    Some(res) => {
-                        log::info!("ensure_l2_offset: write new allocated l1 table");
-                        self.flush_refcount().await?;
-                        self.flush_mapping(&l1_table).await?;
-                        new_l1_table.set_offset(Some(res.0));
-                        self.flush_top_table(&new_l1_table).await?;
-
-                        self.flush_header_for_l1_table(res.0, l1_index + 1).await?;
-                    }
-                };
+                log::info!("ensure_l2_offset: write new allocated l1 table");
+                self.flush_refcount().await?;
+                self.flush_mapping(&l1_table).await?;
+                new_l1_table.set_offset(Some(new_offset));
+                self.flush_top_table(&new_l1_table).await?;
+                self.flush_header_for_l1_table(new_offset, l1_index + 1)
+                    .await?;
 
                 *l1_table = new_l1_table;
                 self.free_clusters(old_l1_offset, old_l1_clusters).await?;

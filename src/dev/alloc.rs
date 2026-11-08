@@ -560,6 +560,40 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.allocate_clusters(1).await
     }
 
+    /// Metadata tables cannot use a shorter allocation than requested.
+    /// Release partial candidates and search the next refblock instead.
+    pub(crate) async fn allocate_clusters_exact(&self, count: usize) -> Qcow2Result<(u64, usize)> {
+        let info = &self.info;
+        if count == 0 || count >= info.rb_entries() {
+            return Err(
+                "Contiguous allocation must fit in one refcount block with room for metadata"
+                    .into(),
+            );
+        }
+        let mut host_offset = self.free_cluster_offset.load(Ordering::Relaxed);
+        loop {
+            if host_offset >= 1_u64 << 56 {
+                return Err("Contiguous allocation exceeds the qcow2 host offset limit".into());
+            }
+            match self.try_allocate_from(host_offset, count).await? {
+                Some(allocation) if allocation.1 == count => {
+                    if count == 1 {
+                        self.free_cluster_offset.fetch_max(
+                            allocation.0 + info.cluster_size() as u64,
+                            Ordering::Relaxed,
+                        );
+                    }
+                    return Ok(allocation);
+                }
+                Some((offset, allocated)) => {
+                    self.free_clusters(offset, allocated).await?;
+                    host_offset = HostCluster(offset).rb_host_end(info);
+                }
+                None => host_offset = HostCluster(host_offset).rb_host_end(info),
+            }
+        }
+    }
+
     async fn count_rb_slice_alloc_clusters(
         &self,
         rt_e: &RefTableEntry,
@@ -622,6 +656,43 @@ mod tests {
     use crate::utils::{make_temp_qcow2_img, qcow2_setup_dev_tokio};
     use std::path::PathBuf;
     use tokio::runtime::Runtime;
+
+    #[tokio::test]
+    async fn test_exact_allocation_releases_short_candidate() {
+        let image = make_temp_qcow2_img(1 << 20, 9, 6);
+        let params = qcow2_default_params!(false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        let original = dev.count_alloc_clusters().await.unwrap();
+        // Fill the first refblock except for its last cluster.
+        let count = dev.info.rb_entries() - original - 1;
+        let allocated = dev.allocate_clusters(count).await.unwrap().unwrap();
+        assert_eq!(allocated.1, count);
+        let last_cluster = (dev.info.rb_entries() as u64 - 1) * 512;
+        assert_eq!(dev.cluster_refcount(last_cluster).await.unwrap(), 0);
+
+        let (offset, count) = dev.allocate_clusters_exact(2).await.unwrap();
+        assert_eq!(count, 2);
+        assert!(offset > last_cluster);
+        assert_eq!(dev.cluster_refcount(last_cluster).await.unwrap(), 0);
+        assert_eq!(dev.cluster_refcount(offset).await.unwrap(), 1);
+        assert_eq!(dev.cluster_refcount(offset + 512).await.unwrap(), 1);
+        assert_eq!(
+            dev.count_alloc_clusters().await.unwrap(),
+            original + allocated.1 + 3
+        );
+        dev.flush_meta().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_exact_allocation_rejects_unsupported_sizes_without_mutation() {
+        let image = make_temp_qcow2_img(1 << 20, 9, 6);
+        let params = qcow2_default_params!(false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        for count in [0, dev.info.rb_entries(), usize::MAX] {
+            assert!(dev.allocate_clusters_exact(count).await.is_err());
+        }
+        assert!(!dev.need_flush_meta());
+    }
 
     #[test]
     fn test_qcow2_dev_allocater_small() {
