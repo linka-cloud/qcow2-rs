@@ -16,8 +16,23 @@ fn be64(bytes: &[u8], i: usize) -> u64 {
     u64::from_be_bytes(bytes[i..i + 8].try_into().unwrap())
 }
 
+fn supports(option: &str) -> bool {
+    let output = Command::new("qemu-img")
+        .args(["create", "-f", "qcow2", "-o", "help"])
+        .output()
+        .unwrap();
+    let yes = String::from_utf8_lossy(&output.stdout).contains(option);
+    if !yes {
+        eprintln!("QEMU fixture tool lacks {option}; skipping that fixture");
+    }
+    yes
+}
+
 #[tokio::test]
 async fn extended_l2_subclusters_write_zero_discard_and_reopen() {
+    if !supports("extended_l2") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let d = directory.path();
     let mut expected = vec![0x5a; 1 << 20];
@@ -79,6 +94,9 @@ async fn extended_l2_subclusters_write_zero_discard_and_reopen() {
 
 #[tokio::test]
 async fn extended_l2_compressed_clusters_survive_partial_overwrite() {
+    if !supports("extended_l2") {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let d = directory.path();
     let mut expected = vec![0x5a; 1 << 20];
@@ -126,7 +144,13 @@ async fn extended_l2_compressed_clusters_survive_partial_overwrite() {
 
 #[tokio::test]
 async fn external_data_files_support_offset_zero_raw_consistency_and_override() {
+    if !supports("data_file") {
+        return;
+    }
     for extended in [false, true] {
+        if extended && !supports("extended_l2") {
+            continue;
+        }
         let directory = tempfile::tempdir().unwrap();
         let d = directory.path();
         let options = if extended {
@@ -189,6 +213,9 @@ async fn external_data_files_support_offset_zero_raw_consistency_and_override() 
 async fn snapshot_lifecycle_preserves_disk_and_vm_state() {
     use qcow2_rs::dev::SnapshotOptions;
     for extended in [false, true] {
+        if extended && !supports("extended_l2") {
+            continue;
+        }
         let directory = tempfile::tempdir().unwrap();
         let d = directory.path();
         let options = if extended {
@@ -305,4 +332,64 @@ async fn qemu_snapshots_allow_safe_writes_and_size_restore() {
         ],
         d,
     );
+}
+
+// Subclusters can be smaller than the backend's required transfer alignment.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn extended_l2_with_4k_direct_io_reads_compressed_and_backing_subclusters() {
+    if !supports("extended_l2") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let d = directory.path();
+    let expected = vec![0x5a; 1 << 20];
+    std::fs::write(d.join("source.raw"), &expected).unwrap();
+    qemu(
+        &[
+            "convert",
+            "-c",
+            "-f",
+            "raw",
+            "-O",
+            "qcow2",
+            "-o",
+            "extended_l2=on,cluster_size=16384",
+            "source.raw",
+            "compressed.qcow2",
+        ],
+        d,
+    );
+    qemu(
+        &[
+            "create",
+            "-f",
+            "qcow2",
+            "-o",
+            "extended_l2=on,cluster_size=16384",
+            "-F",
+            "raw",
+            "-b",
+            "source.raw",
+            "backed.qcow2",
+        ],
+        d,
+    );
+    for image in ["compressed.qcow2", "backed.qcow2"] {
+        let p = Qcow2DevParams::new(12, None, None, false, true);
+        let dev = qcow2_rs::utils::qcow2_setup_dev_sync(&d.join(image), &p).unwrap();
+        dev.qcow2_prep_io().await.unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(4096);
+        dev.read_at(&mut buf, 12288).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0x5a));
+        buf.fill(0xa7);
+        dev.write_at(&buf, 4096).await.unwrap();
+        dev.read_at(&mut buf, 12288).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0x5a));
+        dev.read_at(&mut buf, 4096).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0xa7));
+        dev.check().await.unwrap();
+        drop(dev);
+        qemu(&["check", "-q", image], d);
+    }
 }

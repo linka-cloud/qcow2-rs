@@ -110,7 +110,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
         let mut _compressed_data = Qcow2IoBuf::<u8>::new(aligned_len);
         let res = self.call_read(aligned_off, &mut _compressed_data).await?;
-        if res != aligned_len {
+        if res < pad + compressed_length {
             return Err("do_read_compressed: short read compressed data".into());
         }
         let compressed_data = &_compressed_data[pad..(pad + compressed_length)];

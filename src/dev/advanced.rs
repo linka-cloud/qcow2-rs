@@ -160,31 +160,45 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let n = (unit - off as usize % unit)
                 .min(buf.len() - done)
                 .min(valid - done);
-            // Keep host I/O sector aligned at a partial virtual EOF.
-            let io_len = n.div_ceil(bs) * bs;
-            let mut tmp = Qcow2IoBuf::<u8>::new(io_len);
-            tmp.fill(0);
+            let mut tmp = vec![0; n];
             let mapping = self.advanced_mapping(off).await?;
             let count = match mapping.source {
                 MappingSource::DataFile => {
                     let host =
                         mapping.cluster_offset.unwrap() + self.info.in_cluster_offset(off) as u64;
                     if self.info.external_data() {
-                        self.data_file
+                        let base = host & !(bs as u64 - 1);
+                        let pad = (host - base) as usize;
+                        let mut aligned = Qcow2IoBuf::<u8>::new((pad + n).div_ceil(bs) * bs);
+                        let count = self
+                            .data_file
                             .as_ref()
                             .ok_or_else(|| invalid("Missing external data file"))?
-                            .read_to(host, &mut tmp)
-                            .await?
+                            .read_to(base, &mut aligned)
+                            .await?;
+                        if count < pad + n {
+                            return Err(invalid("Short external data read"));
+                        }
+                        tmp.copy_from_slice(&aligned[pad..pad + n]);
+                        n
                     } else {
-                        self.call_read(host, &mut tmp).await?
+                        tmp.copy_from_slice(&self.read_bytes(host, n).await?);
+                        n
                     }
                 }
                 MappingSource::Compressed => {
                     self.do_read_compressed(mapping, self.info.in_cluster_offset(off), &mut tmp)
                         .await?
                 }
-                MappingSource::Backing => self.read_backing_data(&mut tmp, off).await?,
-                _ => io_len,
+                MappingSource::Backing => {
+                    let base = off & !(bs as u64 - 1);
+                    let pad = (off - base) as usize;
+                    let mut aligned = Qcow2IoBuf::<u8>::new((pad + n).div_ceil(bs) * bs);
+                    self.read_backing_data(&mut aligned, base).await?;
+                    tmp.copy_from_slice(&aligned[pad..pad + n]);
+                    n
+                }
+                _ => n,
             };
             if count < n {
                 return Err(invalid("Short guest payload read"));
