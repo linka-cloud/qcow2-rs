@@ -36,10 +36,16 @@ async fn codec_reads_packed_output_fallback_snapshots_and_reopen_interoperate() 
             }
             rng.fill_bytes(&mut data[11 * cs..]);
             std::fs::write(d.join("source.raw"), &data).unwrap();
-            let options = format!(
-                "cluster_size={cs},compression_type={codec},extended_l2={}",
-                if extended { "on" } else { "off" }
-            );
+            let mut options = format!("cluster_size={cs}");
+            if help.contains("compression_type") {
+                options.push_str(&format!(",compression_type={codec}"));
+            }
+            if help.contains("extended_l2") {
+                options.push_str(&format!(
+                    ",extended_l2={}",
+                    if extended { "on" } else { "off" }
+                ));
+            }
             qemu(
                 d,
                 &[
@@ -97,5 +103,63 @@ async fn codec_reads_packed_output_fallback_snapshots_and_reopen_interoperate() 
             dev.read_at(&mut buf, 0).await.unwrap();
             assert_eq!(&buf[..], data);
         }
+    }
+}
+
+#[tokio::test]
+async fn native_zstd_selection_roundtrips_and_rejects_populated_images() {
+    let image = qcow2_rs::utils::make_temp_qcow2_img(1 << 20, 16, 4);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.set_compression_type(qcow2_rs::dev::CompressionType::Zstd)
+        .await
+        .unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(65536);
+    buf.fill(0x5a);
+    dev.write_compressed_at(&buf, 0).await.unwrap();
+    assert!(dev
+        .set_compression_type(qcow2_rs::dev::CompressionType::Deflate)
+        .await
+        .is_err());
+    buf.fill(0);
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    dev.check().await.unwrap();
+    drop(dev);
+    let help = Command::new("qemu-img")
+        .args(["create", "-f", "qcow2", "-o", "help"])
+        .output()
+        .unwrap();
+    if !String::from_utf8_lossy(&help.stdout).contains("compression_type") {
+        return;
+    }
+    let out = Command::new("qemu-img")
+        .args(["check", "-q"])
+        .arg(image.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+
+#[tokio::test]
+async fn compressed_packing_respects_narrow_refcount_capacity() {
+    for order in 0..=2 {
+        let image = qcow2_rs::utils::make_temp_qcow2_img(1 << 20, 16, order);
+        let p = Qcow2DevParams::new(9, None, None, false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(1 << 20);
+        buf.fill(0x5a);
+        dev.write_compressed_at(&buf, 0).await.unwrap();
+        dev.check().await.unwrap();
+        buf.fill(0);
+        dev.read_at(&mut buf, 0).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0x5a));
+        drop(dev);
+        let out = Command::new("qemu-img")
+            .args(["check", "-q"])
+            .arg(image.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "order {order}: {out:?}");
     }
 }

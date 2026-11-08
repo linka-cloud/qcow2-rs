@@ -713,6 +713,15 @@ impl Qcow2Header {
     pub fn compression_type(&self) -> u8 {
         self.raw.compression_type
     }
+    pub(crate) fn set_compression_type(&mut self, codec: u8) {
+        if self.raw.header_length == 104 && codec != 0 {
+            self.raw.header_length = 112;
+            self.unknown_header_fields.resize(7, 0);
+        }
+        self.raw.compression_type = codec;
+        self.raw.incompatible_features =
+            (self.raw.incompatible_features & !8) | if codec != 0 { 8 } else { 0 };
+    }
 
     pub fn incompatible_features(&self) -> u64 {
         self.raw.incompatible_features

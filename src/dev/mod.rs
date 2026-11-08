@@ -25,6 +25,7 @@ mod snapshots;
 mod write;
 use self::alloc::HostCluster;
 pub use self::bitmaps::BitmapInfo;
+pub use self::compression::CompressionType;
 pub use self::crypto::LuksOptions;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};

@@ -5,6 +5,12 @@ use super::*;
 use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
 use miniz_oxide::inflate::TINFLStatus;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionType {
+    Deflate,
+    Zstd,
+}
+
 pub(crate) fn decode(codec: u8, input: &[u8], size: usize) -> Qcow2Result<Vec<u8>> {
     // An extra output byte distinguishes a complete stream from an oversized
     // stream that happened to fill the guest cluster before its end marker.
@@ -39,6 +45,32 @@ pub(crate) fn decode(codec: u8, input: &[u8], size: usize) -> Qcow2Result<Vec<u8
 }
 
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
+    /// Select the compression format before allocating any payload storage.
+    pub async fn set_compression_type(&self, codec: CompressionType) -> Qcow2Result<()> {
+        let _io = self.io_lock.write().await;
+        if self.header.read().await.version() != 3
+            || self.info.encrypted()
+            || self.info.external_data()
+        {
+            return Err(invalid(
+                "Compression selection requires an unencrypted v3 image without external data",
+            ));
+        }
+        self.flush_meta_locked().await?;
+        if self.graph().await?.data_mappings.0 != 0 {
+            return Err(invalid("Select compression before allocating data"));
+        }
+        self.begin_transaction().await?;
+        self.header
+            .write()
+            .await
+            .set_compression_type(if codec == CompressionType::Zstd { 1 } else { 0 });
+        let result = self.rebuild_refcounts().await;
+        if result.is_err() {
+            self.needs_repair.store(true, Ordering::Release);
+        }
+        result
+    }
     /// Write complete guest clusters with the image's compression codec.
     /// A final partial cluster is allowed only at virtual EOF. Incompressible
     /// clusters fall back to ordinary storage. A batch is limited to 32 MiB.
@@ -70,6 +102,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let codec = self.header.read().await.compression_type();
         let mut packed = Vec::new();
         let mut entries = Vec::new();
+        let bits = 1_usize << self.info.refcount_order();
+        let max_refs = if bits == 64 {
+            u64::MAX
+        } else {
+            (1_u64 << bits) - 1
+        };
+        let mut references: Vec<u64> = Vec::new();
         for chunk in data.chunks(cs) {
             let mut padded = vec![0; cs];
             padded[..chunk.len()].copy_from_slice(chunk);
@@ -81,6 +120,19 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             if encoded.len() >= cs {
                 entries.push(None);
             } else {
+                let last = (packed.len() + encoded.len() - 1) / cs;
+                references.resize(references.len().max(last + 1), 0);
+                if references[packed.len() / cs..=last]
+                    .iter()
+                    .any(|n| *n >= max_refs)
+                {
+                    packed.resize(packed.len().div_ceil(cs) * cs, 0);
+                }
+                let last = (packed.len() + encoded.len() - 1) / cs;
+                references.resize(references.len().max(last + 1), 0);
+                for count in &mut references[packed.len() / cs..=last] {
+                    *count += 1;
+                }
                 entries.push(Some((packed.len(), encoded.len())));
                 packed.extend(encoded);
             }
