@@ -109,3 +109,25 @@ jobs:
       - run: cargo clippy --all-targets --no-deps
       - run: cargo test -- --nocapture
       - run: cargo test --release
+
+  test_freebsd:
+    name: qcow2_rs FreeBSD
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test native Tokio and synchronous backends in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14'
+          copyback: false
+          prepare: |
+            pkg install -y rust qemu pkgconf openssl
+          run: |
+            set -eu
+            export OPENSSL_DIR=/usr/local
+            export CARGO_TERM_COLOR=always
+            rustc --version
+            qemu-img --version
+            cargo test -- --nocapture
+            cargo test --release
