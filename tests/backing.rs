@@ -269,3 +269,26 @@ async fn smaller_qcow2_backing_zero_fills_partial_cluster_cow() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     compare_with_qemu(&top, &expected);
 }
+
+#[tokio::test]
+async fn hard_linked_raw_backing_cannot_alias_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("disk.qcow2");
+    let alias = dir.path().join("base.raw");
+    let options = qcow2_rs::dev::CreateOptions {
+        size: 1 << 20,
+        backing: Some(qcow2_rs::dev::BackingFile {
+            path: "base.raw".into(),
+            format: Some(qcow2_rs::dev::BackingFormat::Raw),
+        }),
+        ..Default::default()
+    };
+    std::fs::write(&alias, vec![0; 512]).unwrap();
+    qcow2_rs::dev::create_qcow2(&image, &options).await.unwrap();
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::hard_link(&image, &alias).unwrap();
+    let params = Qcow2DevParams::new(9, None, None, false, false);
+    let before = std::fs::read(&image).unwrap();
+    assert!(qcow2_setup_dev_tokio(&image, &params).await.is_err());
+    assert_eq!(std::fs::read(&image).unwrap(), before);
+}

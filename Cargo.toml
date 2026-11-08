@@ -37,6 +37,7 @@ tempfile = "3.6.0"
 zstd = "0.13"
 openssl = "0.10"
 zeroize = "1"
+same-file = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { version = "0.5"}

@@ -78,6 +78,32 @@ pub async fn qcow2_alloc_dev<T: Qcow2IoOps>(
     Ok((Qcow2Dev::new(path, header, params, io)?, back_path))
 }
 
+/// Storage identity checks include hard links as well as canonical paths.
+#[doc(hidden)]
+pub fn qcow2_storage_seen(
+    paths: &std::collections::HashSet<PathBuf>,
+    path: &Path,
+) -> Qcow2Result<bool> {
+    let canonical = std::fs::canonicalize(path)?;
+    for previous in paths {
+        if *previous == canonical || same_file::is_same_file(previous, &canonical)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+#[doc(hidden)]
+pub fn qcow2_register_storage(
+    paths: &mut std::collections::HashSet<PathBuf>,
+    path: &Path,
+) -> Qcow2Result<bool> {
+    if qcow2_storage_seen(paths, path)? {
+        return Ok(false);
+    }
+    paths.insert(std::fs::canonicalize(path)?);
+    Ok(true)
+}
+
 /// Honor an explicit backing format; probe QCOW2 magic when it is absent.
 pub fn qcow2_backing_is_raw(path: &Path, format: Option<&str>) -> Qcow2Result<bool> {
     match format {
@@ -130,7 +156,7 @@ macro_rules! qcow2_setup_dev_fn {
                 if ancestors.len() >= 256 {
                     return Err("Backing chain exceeds the supported depth of 256".into());
                 }
-                if !ancestors.insert(std::fs::canonicalize(path)?) {
+                if !qcow2_register_storage(ancestors, path)? {
                     return Err("Cycle in qcow2 backing chain".into());
                 }
                 let io =
@@ -149,7 +175,7 @@ macro_rules! qcow2_setup_dev_fn {
                         p.clear_external_data_file();
                         p.mark_backing_dev(Some(true));
                         if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
-                            if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
+                            if qcow2_storage_seen(ancestors, &back_path)? {
                                 return Err("Cycle in qcow2 backing chain".into());
                             }
                             ancestors.insert(std::fs::canonicalize(&back_path)?);
@@ -166,7 +192,7 @@ macro_rules! qcow2_setup_dev_fn {
 
                 if dev.info.external_data() {
                     let path = qcow2_external_path(path, params, dev.data_file_name())?;
-                    if !ancestors.insert(std::fs::canonicalize(&path)?) {
+                    if !qcow2_register_storage(ancestors, &path)? {
                         return Err("External data file aliases image metadata".into());
                     }
                     let file =
@@ -202,7 +228,7 @@ macro_rules! qcow2_setup_dev_fn_sync {
                 if ancestors.len() >= 256 {
                     return Err("Backing chain exceeds the supported depth of 256".into());
                 }
-                if !ancestors.insert(std::fs::canonicalize(path)?) {
+                if !qcow2_register_storage(ancestors, path)? {
                     return Err("Cycle in qcow2 backing chain".into());
                 }
                 let io = <$type>::try_new(path, params.is_read_only(), params.is_direct_io())?;
@@ -220,7 +246,7 @@ macro_rules! qcow2_setup_dev_fn_sync {
                         p.clear_external_data_file();
                         p.mark_backing_dev(Some(true));
                         if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
-                            if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
+                            if qcow2_storage_seen(ancestors, &back_path)? {
                                 return Err("Cycle in qcow2 backing chain".into());
                             }
                             ancestors.insert(std::fs::canonicalize(&back_path)?);
@@ -237,7 +263,7 @@ macro_rules! qcow2_setup_dev_fn_sync {
 
                 if dev.info.external_data() {
                     let path = qcow2_external_path(path, params, dev.data_file_name())?;
-                    if !ancestors.insert(std::fs::canonicalize(&path)?) {
+                    if !qcow2_register_storage(ancestors, &path)? {
                         return Err("External data file aliases image metadata".into());
                     }
                     let file =
