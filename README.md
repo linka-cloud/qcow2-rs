@@ -12,7 +12,7 @@ linux sync IO syscall, tokio and io-uring[^3] with smol[^2] runtime
 - support both direct IO and buffered IO, for direct IO, it needs async
 runtime support, such as tokio doesn't allow it.
 
-- basic read/write function on data file, backing file and compressed image
+- basic read/write function on data file, QCOW2/raw backing chains and Deflate-compressed images
 
 - l2 table & refcount block load & store in slice way, and the minimized
 slice size is block size, and the maximized size is cluster size
@@ -32,6 +32,21 @@ improve, ...)
 One utility is included in this project, which can dump qcow2 meta,
 show any meta related statistics of the image, check image meta integrity &
 host cluster leak, format qcow2 image and convert between qcow2 and raw.
+
+The setup helpers resolve relative backing names from each image's directory,
+honor declared `raw`/`qcow2` formats, and probe the format when no declaration is
+present. They reject cycles, missing files, unsupported formats, and chains
+longer than 256 images. Reads beyond a shorter backing image return zeros;
+partial writes copy unchanged backing data into the overlay.
+
+Setup helpers return opening errors. The built-in IO backends also expose
+fallible `try_new` constructors; their existing `new` constructors retain their
+original return types. Custom backends using the setup macros must provide
+`try_new` with the same arguments and a `Qcow2Result<Self>` return type.
+
+Call `flush_meta()` to persist metadata after writes; dropping the device does
+not flush dirty caches. See [PLAN.md](PLAN.md) for implemented features, current
+limits, validation results, and remaining work.
 
 ## Example
 

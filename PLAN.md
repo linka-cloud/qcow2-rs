@@ -2,6 +2,10 @@
 
 Assessment date: 2026-11-08.
 
+Status: **Phase 1 complete; Phase 2 in progress.** Backing-chain compatibility
+is implemented. Exact refcount reconstruction, repair, optional-metadata
+traversal, and dirty/corrupt-image recovery remain Phase 2 work.
+
 ## Summary and evidence
 
 The library implements core QCOW2 v3 disk I/O, but does not yet support the
@@ -15,6 +19,9 @@ The initial findings were source-level observations, not runtime-confirmed resul
 was missing from the local dependency cache.
 
 ### Implementation progress
+
+Entries below are chronological; the latest checkpoint supersedes earlier
+limitations and test counts.
 
 The first Phase 1 batch is implemented in separate commits:
 
@@ -96,6 +103,44 @@ Header publication now flushes dependencies before an aligned header write and
 syncs that write before old storage can be released; partial/failed header I/O
 can still require on-disk recovery.
 
+### Phase 1 completion / Phase 2 start
+
+| Commit | Change |
+| --- | --- |
+| `f63e4b3` | Allocate contiguous metadata across refblocks and remove the single-refblock table-growth limit |
+| `1437e24` | Validate metadata ranges, capacity, flag prerequisites, entries, and truncation; initialize complete metadata clusters |
+| `849fb03`, `af2c862` | Retain failed metadata writes for retry and preserve ordering across failed synchronization |
+| `d221803` | Add fallible backend opening and report short-write failures |
+| `dc68fbe` | Resolve relative backing paths per image and reject canonical-path cycles |
+| `47ef2ee` | Support raw backing files, honor declared formats, and zero-fill backing EOF during reads and COW |
+| `2a6fb06`, `f05ebf9` | Reject overflowing writes and invalid backing-device/cache parameters without panics |
+| `54a2225` | Verify the full supported 32 MiB contiguous metadata extent |
+
+All Phase 1 checklist items are complete. The supported limits remain a 32 MiB
+L1 table, 8 MiB refcount table, 2 MiB clusters, and 56-bit host offsets. Large
+exact allocations use fresh storage beyond the old refcount table's coverage;
+placement of refblocks outside the requested extent preserves contiguity.
+Whole metadata clusters are initialized before publishing their pointers.
+
+Phase 2 now opens raw/QCOW2 backing chains with relative paths, explicit format
+selection or magic probing when absent, canonical-path cycle detection, and a
+256-image chain limit. Missing files and unsupported formats return errors.
+Reads and partial-cluster COW preserve backing bytes and zero-fill regions beyond
+shorter raw or QCOW2 backings. Backing files are opened read-only.
+
+Validation at this checkpoint: `cargo test --quiet` passes all 94 tests,
+including io_uring. Formatting and Clippy for the library and new regression
+targets pass with warnings; the previously recorded all-target lint failures
+in older test helpers remain outside this change. New backing fixtures pass
+`qemu-img compare` and `qemu-img check`; allocation fixtures also pass QEMU checks.
+Regression tests cover truncated/invalid headers and tables, repeated invalid
+slice reads, v2 zero flags, empty/overflowing I/O, failed write/fsync retries,
+relative multi-level chains, symlink cycles, and unchanged backing data.
+
+Public interface additions: each built-in backend has a fallible `try_new`
+constructor. Existing `new` constructors retain their return type. Setup macros
+now expect `try_new` from custom backends; setup helper signatures are unchanged.
+
 The target is complete on-disk format support for QCOW2 versions 2 and 3,
 including safe reads, writes, metadata preservation, and recovery where
 applicable. QEMU implementation limits can remain where explicitly validated
@@ -158,8 +203,7 @@ Address these before advertising broader feature support:
       and conservatively skip shared/compressed clusters. Failed operations can
       leave allocated leaks for future repair instead of reclaiming live data.
 - [x] Parse v2 headers using their 72-byte layout and implied defaults; serialize
-      them using the correct layout. The current parser reads a v3 structure
-      even for v2 images.
+      them using the correct layout.
 - [x] Accept only supported format versions and validate header lengths,
       refcount orders, offsets, sizes, extension bounds, and reserved fields
       before using them. Return errors rather than panicking on malformed input.
