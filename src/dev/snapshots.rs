@@ -170,6 +170,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             .into_iter()
             .find(|s| s.id == id)
             .ok_or_else(|| invalid("Snapshot not found"))?;
+        let mut bitmaps = self.load_bitmaps().await?;
         self.begin_transaction().await?;
         let result = async {
             let bytes = self
@@ -180,6 +181,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             h.set_l1_table(offset, snapshot.l1_entries as usize)?;
             h.set_size(snapshot.disk_size);
             drop(h);
+            self.stage_bitmap_size_change(&mut bitmaps, snapshot.disk_size)
+                .await?;
             self.rebuild_refcounts().await
         }
         .await;

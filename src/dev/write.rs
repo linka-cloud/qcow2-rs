@@ -662,7 +662,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     pub async fn write_at(&self, buf: &[u8], offset: u64) -> Qcow2Result<()> {
         let io = self.io_lock.read().await;
         self.ensure_usable()?;
-        let mut advanced = self.info.encrypted()
+        let mut advanced = self.has_bitmaps().await
+            || self.info.encrypted()
             || self.info.extended_l2()
             || self.info.external_data()
             || self.header.read().await.nb_snapshots() != 0;

@@ -35,7 +35,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// but must not reclaim a cluster still referenced by a durable mapping.
     pub async fn discard(&self, virtual_offset: u64, len: u64) -> Qcow2Result<()> {
         let _io = self.io_lock.write().await;
-        if self.info.encrypted()
+        if self.has_bitmaps().await
+            || self.info.encrypted()
             || self.info.extended_l2()
             || self.info.external_data()
             || self.header.read().await.nb_snapshots() != 0

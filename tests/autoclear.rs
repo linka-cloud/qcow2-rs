@@ -160,7 +160,7 @@ async fn autoclear_updates_work_with_direct_io() {
 }
 
 #[tokio::test]
-async fn discard_invalidates_persistent_bitmap_metadata() {
+async fn discard_tracks_persistent_bitmap_metadata() {
     // The Windows CI fixture tool predates qemu-img's bitmap subcommand.
     // Other autoclear tests still exercise invalidation on those versions.
     let help = Command::new("qemu-img").arg("--help").output().unwrap();
@@ -178,7 +178,7 @@ async fn discard_invalidates_persistent_bitmap_metadata() {
     dev.fsync_range(0, 0).await.unwrap();
     drop(dev);
     let output = Command::new("qemu-img")
-        .args(["bitmap", "--add"])
+        .args(["bitmap", "--add", "--enable"])
         .arg(image.path())
         .arg("tracking")
         .output()
@@ -201,9 +201,9 @@ async fn discard_invalidates_persistent_bitmap_metadata() {
     dev.discard(0, 1 << 16).await.unwrap();
     dev.flush_meta().await.unwrap();
     let after = std::fs::read(image.path()).unwrap();
-    assert_eq!(&after[88..96], &[0; 8]);
-    assert_eq!(&after[..88], &before[..88]);
-    assert_eq!(&after[96..512], &before[96..512]);
+    assert_eq!(u64::from_be_bytes(after[88..96].try_into().unwrap()) & 1, 1);
+    assert_eq!(dev.read_bitmap("tracking").await.unwrap()[0] & 1, 1);
+    dev.check().await.unwrap();
 }
 
 #[tokio::test]
@@ -276,5 +276,29 @@ async fn lazy_flush_waits_for_inflight_payload_writes() {
     };
     let (result, ()) = tokio::join!(writer, flusher);
     result.unwrap();
+    dev.check().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_bitmap_save_is_explicitly_inconsistent_after_refcount_repair() {
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.create_bitmap("tracking", 9, true).await.unwrap();
+    drop(dev);
+    let state = Rc::new(State::default());
+    let dev = fault_device(image.path(), state.clone()).await;
+    state.fail_nth_write.set(3);
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0x5a);
+    assert!(dev.write_at(&buf, 0).await.is_err());
+    assert!(dev.list_bitmaps().await.unwrap()[0].in_use);
+    assert!(dev.read_at(&mut buf, 0).await.is_err());
+    dev.repair_refcounts().await.unwrap();
+    assert!(dev.read_bitmap("tracking").await.is_err());
+    assert!(dev.write_at(&buf, 0).await.is_err());
+    dev.clear_bitmap("tracking").await.unwrap();
+    dev.write_at(&buf, 0).await.unwrap();
+    assert_eq!(dev.read_bitmap("tracking").await.unwrap()[0], 1);
     dev.check().await.unwrap();
 }

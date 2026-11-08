@@ -262,6 +262,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if offset % bs as u64 != 0 || len % bs != 0 {
             return Err(invalid("Unaligned write"));
         }
+        self.track_dirty_bitmaps(offset, len as u64).await?;
         self.begin_transaction().await?;
         let result = async {
             self.copy_active_l1().await?;

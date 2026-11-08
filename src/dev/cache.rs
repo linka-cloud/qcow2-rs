@@ -17,9 +17,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if self.info.is_read_only() {
             return Err("Attempt to modify a read-only qcow2 image".into());
         }
+        let bitmaps_valid = self.validate_writable_bitmaps().await?;
         let h = self.header.read().await;
         let lazy = h.compatible_features() & 1 != 0;
-        let preserve = if self.info.raw_data() { 2 } else { 0 };
+        let preserve = if self.info.raw_data() { 2 } else { 0 } | u64::from(bitmaps_valid);
         if h.autoclear_features() == preserve && (!lazy || h.incompatible_features() & 1 != 0) {
             return Ok(());
         }

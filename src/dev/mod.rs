@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 mod advanced;
 mod alloc;
+mod bitmaps;
 mod cache;
 mod check;
 mod compression;
@@ -23,6 +24,7 @@ mod repair;
 mod snapshots;
 mod write;
 use self::alloc::HostCluster;
+pub use self::bitmaps::BitmapInfo;
 pub use self::crypto::LuksOptions;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};

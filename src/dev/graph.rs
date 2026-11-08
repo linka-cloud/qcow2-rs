@@ -46,6 +46,7 @@ pub struct RefcountMismatch {
 pub struct CheckReport {
     pub mismatches: Vec<RefcountMismatch>,
     pub copied_flag_errors: Vec<u64>,
+    pub inconsistent_bitmaps: Vec<String>,
     pub dirty: bool,
     pub corrupt: bool,
 }
@@ -53,6 +54,7 @@ impl CheckReport {
     pub fn is_clean(&self) -> bool {
         self.mismatches.is_empty()
             && self.copied_flag_errors.is_empty()
+            && self.inconsistent_bitmaps.is_empty()
             && !self.dirty
             && !self.corrupt
     }
@@ -300,6 +302,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 .await?;
         }
         if let Some(b) = bitmap {
+            self.load_bitmaps().await?;
             if b.len() != 24 || u32_at(&b, 0) == 0 || u32_at(&b, 0) > 65535 || u32_at(&b, 4) != 0 {
                 return Err(invalid("Invalid bitmap extension"));
             }
@@ -395,6 +398,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let graph = self.graph().await?;
         let actual = self.actual_refcounts().await?;
         let mut report = CheckReport::default();
+        report.inconsistent_bitmaps = self
+            .load_bitmaps()
+            .await?
+            .into_iter()
+            .filter(|m| !m.info.consistent)
+            .map(|m| m.info.name)
+            .collect();
         for c in graph
             .counts
             .keys()

@@ -88,6 +88,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if !report.copied_flag_errors.is_empty() {
             return Err(super::graph::invalid("Inaccurate active copied flags"));
         }
+        if !report.inconsistent_bitmaps.is_empty() {
+            return Err(super::graph::invalid(
+                "Persistent bitmap contents require explicit recovery",
+            ));
+        }
         Ok(())
     }
 
