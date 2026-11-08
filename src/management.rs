@@ -143,7 +143,6 @@ pub enum ManagementArgs {
     Amend(AmendArgs),
     /// Inspect or change LUKS1 credentials; passphrases are read verbatim
     Keyslot {
-        file: PathBuf,
         #[command(subcommand)]
         action: KeyslotAction,
     },
@@ -167,26 +166,42 @@ pub struct AmendArgs {
 }
 #[derive(Subcommand)]
 pub enum KeyslotAction {
-    List,
+    List {
+        file: PathBuf,
+    },
     Add {
+        file: PathBuf,
         index: usize,
         password_file: PathBuf,
         #[arg(long, default_value_t = 200_000)]
         iterations: u32,
     },
     Remove {
+        file: PathBuf,
         index: usize,
         /// Allow revocation of the last password (makes reopening impossible)
         #[arg(long)]
         allow_last: bool,
     },
     Change {
+        file: PathBuf,
         index: usize,
         password_file: PathBuf,
         #[arg(long, default_value_t = 200_000)]
         iterations: u32,
     },
 }
+impl KeyslotAction {
+    fn file(&self) -> &std::path::Path {
+        match self {
+            Self::List { file }
+            | Self::Add { file, .. }
+            | Self::Remove { file, .. }
+            | Self::Change { file, .. } => file,
+        }
+    }
+}
+
 fn resolve(file: &std::path::Path, name: &std::path::Path) -> PathBuf {
     if name.is_absolute() {
         name.into()
@@ -284,12 +299,13 @@ pub async fn run(args: ManagementArgs, context: &OpenContext) -> Qcow2Result<()>
                 .await?;
             }
         }
-        ManagementArgs::Keyslot { file, action } => {
-            let read_only = matches!(action, KeyslotAction::List);
+        ManagementArgs::Keyslot { action } => {
+            let read_only = matches!(action, KeyslotAction::List { .. });
             let dev =
-                qcow2_setup_dev_tokio(&file, &image_params(read_only, false, context)).await?;
+                qcow2_setup_dev_tokio(action.file(), &image_params(read_only, false, context))
+                    .await?;
             match action {
-                KeyslotAction::List => {
+                KeyslotAction::List { .. } => {
                     println!("INDEX\tACTIVE\tITERATIONS\tSTRIPES");
                     for slot in dev.luks_keyslots().await? {
                         println!(
@@ -302,18 +318,20 @@ pub async fn run(args: ManagementArgs, context: &OpenContext) -> Qcow2Result<()>
                     index,
                     password_file,
                     iterations,
+                    ..
                 } => {
                     let bytes = Zeroizing::new(std::fs::read(password_file)?);
                     dev.add_luks_keyslot(index, &bytes, LuksOptions { iterations })
                         .await?;
                 }
-                KeyslotAction::Remove { index, allow_last } => {
-                    dev.remove_luks_keyslot(index, allow_last).await?
-                }
+                KeyslotAction::Remove {
+                    index, allow_last, ..
+                } => dev.remove_luks_keyslot(index, allow_last).await?,
                 KeyslotAction::Change {
                     index,
                     password_file,
                     iterations,
+                    ..
                 } => {
                     let bytes = Zeroizing::new(std::fs::read(password_file)?);
                     let replacement = dev

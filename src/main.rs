@@ -26,8 +26,6 @@ pub struct CheckArgs {
 
 #[derive(Args, Debug)]
 pub struct SnapshotArgs {
-    /// QCOW2 image path
-    file: PathBuf,
     #[command(subcommand)]
     action: SnapshotAction,
 }
@@ -35,9 +33,10 @@ pub struct SnapshotArgs {
 #[derive(Subcommand, Debug)]
 pub enum SnapshotAction {
     /// List internal snapshots
-    List,
+    List { file: PathBuf },
     /// Save the active disk and optional VM-state payload
     Create {
+        file: PathBuf,
         id: String,
         #[arg(long, default_value = "")]
         name: String,
@@ -45,11 +44,27 @@ pub enum SnapshotAction {
         vm_state: Option<PathBuf>,
     },
     /// Delete an internal snapshot
-    Delete { id: String },
+    Delete { file: PathBuf, id: String },
     /// Restore the disk contents and virtual size of a snapshot
-    Restore { id: String },
+    Restore { file: PathBuf, id: String },
     /// Export saved VM-state bytes to a new file
-    VmState { id: String, output: PathBuf },
+    VmState {
+        file: PathBuf,
+        id: String,
+        output: PathBuf,
+    },
+}
+
+impl SnapshotAction {
+    fn file(&self) -> &Path {
+        match self {
+            Self::List { file }
+            | Self::Create { file, .. }
+            | Self::Delete { file, .. }
+            | Self::Restore { file, .. }
+            | Self::VmState { file, .. } => file,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -63,15 +78,17 @@ pub struct ZeroArgs {
 
 #[derive(Args, Debug)]
 pub struct BitmapArgs {
-    file: PathBuf,
     #[command(subcommand)]
     action: BitmapAction,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum BitmapAction {
-    List,
+    List {
+        file: PathBuf,
+    },
     Create {
+        file: PathBuf,
         name: String,
         #[arg(long, default_value_t = 16)]
         granularity_bits: u8,
@@ -79,30 +96,53 @@ pub enum BitmapAction {
         disabled: bool,
     },
     Remove {
+        file: PathBuf,
         name: String,
     },
     Clear {
+        file: PathBuf,
         name: String,
     },
     Enable {
+        file: PathBuf,
         name: String,
     },
     Disable {
+        file: PathBuf,
         name: String,
     },
     Rename {
+        file: PathBuf,
         name: String,
         new_name: String,
     },
     Merge {
+        file: PathBuf,
         name: String,
         source: String,
     },
     /// Export bitmap bytes (least significant bit first within each byte)
     Export {
+        file: PathBuf,
         name: String,
         output: PathBuf,
     },
+}
+
+impl BitmapAction {
+    fn file(&self) -> &Path {
+        match self {
+            Self::List { file }
+            | Self::Create { file, .. }
+            | Self::Remove { file, .. }
+            | Self::Clear { file, .. }
+            | Self::Enable { file, .. }
+            | Self::Disable { file, .. }
+            | Self::Rename { file, .. }
+            | Self::Merge { file, .. }
+            | Self::Export { file, .. } => file,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -841,18 +881,20 @@ fn snapshot_qcow2(args: SnapshotArgs, context: &OpenContext) -> Qcow2Result<()> 
     Runtime::new()?.block_on(async {
         let read_only = matches!(
             args.action,
-            SnapshotAction::List | SnapshotAction::VmState { .. }
+            SnapshotAction::List { .. } | SnapshotAction::VmState { .. }
         );
         let params = image_params(read_only, false, context);
-        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        let dev = qcow2_setup_dev_tokio(args.action.file(), &params).await?;
         match args.action {
-            SnapshotAction::List => {
+            SnapshotAction::List { .. } => {
                 println!("ID\tNAME\tDISK BYTES\tVM STATE BYTES");
                 for s in dev.list_snapshots().await? {
                     println!("{}\t{}\t{}\t{}", s.id, s.name, s.disk_size, s.vm_state_size);
                 }
             }
-            SnapshotAction::Create { id, name, vm_state } => {
+            SnapshotAction::Create {
+                id, name, vm_state, ..
+            } => {
                 let state = vm_state.map(std::fs::read).transpose()?.unwrap_or_default();
                 dev.create_snapshot(
                     qcow2_rs::dev::SnapshotOptions {
@@ -864,9 +906,9 @@ fn snapshot_qcow2(args: SnapshotArgs, context: &OpenContext) -> Qcow2Result<()> 
                 )
                 .await?;
             }
-            SnapshotAction::Delete { id } => dev.delete_snapshot(&id).await?,
-            SnapshotAction::Restore { id } => dev.restore_snapshot(&id).await?,
-            SnapshotAction::VmState { id, output } => {
+            SnapshotAction::Delete { id, .. } => dev.delete_snapshot(&id).await?,
+            SnapshotAction::Restore { id, .. } => dev.restore_snapshot(&id).await?,
+            SnapshotAction::VmState { id, output, .. } => {
                 // Validate the snapshot before creating the output file.
                 dev.read_snapshot_vm_state(&id, 0, &mut []).await?;
                 let mut file = std::fs::OpenOptions::new()
@@ -902,12 +944,12 @@ fn bitmap_qcow2(args: BitmapArgs, context: &OpenContext) -> Qcow2Result<()> {
     Runtime::new()?.block_on(async {
         let read_only = matches!(
             args.action,
-            BitmapAction::List | BitmapAction::Export { .. }
+            BitmapAction::List { .. } | BitmapAction::Export { .. }
         );
         let params = image_params(read_only, false, context);
-        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        let dev = qcow2_setup_dev_tokio(args.action.file(), &params).await?;
         match args.action {
-            BitmapAction::List => {
+            BitmapAction::List { .. } => {
                 println!("NAME\tGRANULARITY BITS\tENABLED\tCONSISTENT\tIN USE");
                 for bitmap in dev.list_bitmaps().await? {
                     println!(
@@ -924,17 +966,20 @@ fn bitmap_qcow2(args: BitmapArgs, context: &OpenContext) -> Qcow2Result<()> {
                 name,
                 granularity_bits,
                 disabled,
+                ..
             } => {
                 dev.create_bitmap(&name, granularity_bits, !disabled)
                     .await?
             }
-            BitmapAction::Remove { name } => dev.remove_bitmap(&name).await?,
-            BitmapAction::Clear { name } => dev.clear_bitmap(&name).await?,
-            BitmapAction::Enable { name } => dev.set_bitmap_enabled(&name, true).await?,
-            BitmapAction::Disable { name } => dev.set_bitmap_enabled(&name, false).await?,
-            BitmapAction::Rename { name, new_name } => dev.rename_bitmap(&name, &new_name).await?,
-            BitmapAction::Merge { name, source } => dev.merge_bitmap(&name, &source).await?,
-            BitmapAction::Export { name, output } => {
+            BitmapAction::Remove { name, .. } => dev.remove_bitmap(&name).await?,
+            BitmapAction::Clear { name, .. } => dev.clear_bitmap(&name).await?,
+            BitmapAction::Enable { name, .. } => dev.set_bitmap_enabled(&name, true).await?,
+            BitmapAction::Disable { name, .. } => dev.set_bitmap_enabled(&name, false).await?,
+            BitmapAction::Rename { name, new_name, .. } => {
+                dev.rename_bitmap(&name, &new_name).await?
+            }
+            BitmapAction::Merge { name, source, .. } => dev.merge_bitmap(&name, &source).await?,
+            BitmapAction::Export { name, output, .. } => {
                 let bytes = dev.read_bitmap(&name).await?;
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)

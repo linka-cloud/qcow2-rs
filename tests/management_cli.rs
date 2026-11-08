@@ -20,13 +20,13 @@ fn snapshot_and_zero_commands_roundtrip_disk_and_vm_state() {
     };
     run(&[
         "snapshot".as_ref(),
-        image.as_os_str(),
         "create".as_ref(),
+        image.as_os_str(),
         "saved".as_ref(),
         "--vm-state".as_ref(),
         state.as_os_str(),
     ]);
-    let output = run(&["snapshot".as_ref(), image.as_os_str(), "list".as_ref()]);
+    let output = run(&["snapshot".as_ref(), "list".as_ref(), image.as_os_str()]);
     assert!(String::from_utf8_lossy(&output.stdout).contains("saved"));
     run(&[
         "zero".as_ref(),
@@ -36,22 +36,22 @@ fn snapshot_and_zero_commands_roundtrip_disk_and_vm_state() {
     ]);
     run(&[
         "snapshot".as_ref(),
-        image.as_os_str(),
         "restore".as_ref(),
+        image.as_os_str(),
         "saved".as_ref(),
     ]);
     run(&[
         "snapshot".as_ref(),
-        image.as_os_str(),
         "vm-state".as_ref(),
+        image.as_os_str(),
         "saved".as_ref(),
         exported.as_os_str(),
     ]);
     assert_eq!(std::fs::read(exported).unwrap(), b"saved VM state");
     run(&[
         "snapshot".as_ref(),
-        image.as_os_str(),
         "delete".as_ref(),
+        image.as_os_str(),
         "saved".as_ref(),
     ]);
     run(&["check".as_ref(), image.as_os_str()]);
@@ -100,8 +100,8 @@ fn phase4_creation_bitmaps_compressed_writes_and_secrets() {
         }
         run(&[
             "bitmap".as_ref(),
-            image.as_os_str(),
             "create".as_ref(),
+            image.as_os_str(),
             "tracking".as_ref(),
             "--granularity-bits".as_ref(),
             "9".as_ref(),
@@ -123,8 +123,8 @@ fn phase4_creation_bitmaps_compressed_writes_and_secrets() {
         });
         run(&[
             "bitmap".as_ref(),
-            image.as_os_str(),
             "export".as_ref(),
+            image.as_os_str(),
             "tracking".as_ref(),
             export.as_os_str(),
         ]);
@@ -136,8 +136,59 @@ fn phase4_creation_bitmaps_compressed_writes_and_secrets() {
             assert!(bits[..16].iter().all(|b| *b == 0xff));
         }
         run(&["check".as_ref(), image.as_os_str()]);
-        let info = run(&["bitmap".as_ref(), image.as_os_str(), "list".as_ref()]);
+        let info = run(&["bitmap".as_ref(), "list".as_ref(), image.as_os_str()]);
         assert!(String::from_utf8_lossy(&info.stdout).contains("tracking"));
+        run(&[
+            "bitmap".as_ref(),
+            "rename".as_ref(),
+            image.as_os_str(),
+            "tracking".as_ref(),
+            "changes".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "clear".as_ref(),
+            image.as_os_str(),
+            "changes".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "disable".as_ref(),
+            image.as_os_str(),
+            "changes".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "enable".as_ref(),
+            image.as_os_str(),
+            "changes".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "create".as_ref(),
+            image.as_os_str(),
+            "extra".as_ref(),
+            "--disabled".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "merge".as_ref(),
+            image.as_os_str(),
+            "changes".as_ref(),
+            "extra".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "remove".as_ref(),
+            image.as_os_str(),
+            "extra".as_ref(),
+        ]);
+        run(&[
+            "bitmap".as_ref(),
+            "remove".as_ref(),
+            image.as_os_str(),
+            "changes".as_ref(),
+        ]);
         if encryption {
             let before = std::fs::read(&image).unwrap();
             let output = Command::new(env!("CARGO_BIN_EXE_rqcow2"))
@@ -183,7 +234,7 @@ fn native_creation_resize_amend_rebase_commit_and_preallocation() {
         "--preallocation",
         "metadata",
     ]);
-    management_run(&["snapshot", image, "create", "saved"]);
+    management_run(&["snapshot", "create", image, "saved"]);
     management_run(&["zero", image, "0", "512"]);
     management_run(&["resize", image, "2097152"]);
     let failed = Command::new(env!("CARGO_BIN_EXE_rqcow2"))
@@ -210,7 +261,7 @@ fn native_creation_resize_amend_rebase_commit_and_preallocation() {
         &std::fs::read(base).unwrap()[..1024],
         &[vec![0; 512], vec![0x63; 512]].concat()
     );
-    management_run(&["snapshot", image, "restore", "saved"]);
+    management_run(&["snapshot", "restore", image, "saved"]);
     management_run(&["commit", image, "--keep-overlay"]);
     assert_eq!(&std::fs::read(base).unwrap()[..1024], &[0x63; 1024]);
     management_run(&["rebase", image]);
@@ -278,8 +329,8 @@ fn keyslot_commands_and_distinct_backing_credentials() {
         "--image-secret-file",
         &override_arg,
         "keyslot",
-        &image,
         "add",
+        &image,
         "1",
         &third,
         "--iterations",
@@ -291,8 +342,8 @@ fn keyslot_commands_and_distinct_backing_credentials() {
         "--image-secret-file",
         &override_arg,
         "keyslot",
-        &image,
         "change",
+        &image,
         "0",
         &third,
         "--iterations",
@@ -304,8 +355,8 @@ fn keyslot_commands_and_distinct_backing_credentials() {
         "--image-secret-file",
         &override_arg,
         "keyslot",
-        &image,
         "remove",
+        &image,
         "1",
     ]);
     let out = management_run(&[
@@ -314,8 +365,8 @@ fn keyslot_commands_and_distinct_backing_credentials() {
         "--image-secret-file",
         &override_arg,
         "keyslot",
-        &image,
         "list",
+        &image,
     ]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("2\ttrue\t1000"));
     management_run(&[
@@ -425,4 +476,35 @@ fn conversion_pads_partial_sectors_and_rejects_storage_aliases() {
         .unwrap();
     management_run(&["convert", "-f", "qcow2", "-O", "raw", "-o", &output, &odd]);
     assert_eq!(std::fs::read(&output).unwrap(), vec![0; 65537]);
+}
+
+#[test]
+fn grouped_help_places_actions_before_files_and_rejects_the_old_order() {
+    for group in ["snapshot", "bitmap", "keyslot"] {
+        let out = management_run(&[group, "--help"]);
+        let help = String::from_utf8_lossy(&out.stdout);
+        let usage = help
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap();
+        assert!(usage.contains("<COMMAND>"), "{usage}");
+        assert!(!usage.contains("<FILE>"), "{usage}");
+        let out = management_run(&[group, "list", "--help"]);
+        assert!(String::from_utf8_lossy(&out.stdout)
+            .contains(&format!("{group} list [OPTIONS] <FILE>")));
+        let out = Command::new(env!("CARGO_BIN_EXE_rqcow2"))
+            .args([group, "disk.qcow2", "list"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand"));
+    }
+    for (group, action, operands) in [
+        ("snapshot", "create", "<FILE> <ID>"),
+        ("bitmap", "rename", "<FILE> <NAME> <NEW_NAME>"),
+        ("keyslot", "change", "<FILE> <INDEX> <PASSWORD_FILE>"),
+    ] {
+        let out = management_run(&[group, action, "--help"]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains(operands));
+    }
 }
