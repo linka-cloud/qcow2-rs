@@ -103,8 +103,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let namesize = u16_at(entry, 18) as usize;
             let extra = u32_at(entry, 20) as usize;
             let end = cursor
-                .checked_add(24 + namesize + extra)
+                .checked_add(24)
+                .and_then(|n| n.checked_add(namesize))
+                .and_then(|n| n.checked_add(extra))
                 .ok_or("Bitmap directory overflow")?;
+            if end > directory.len() {
+                return Err(invalid("Bitmap entry exceeds directory"));
+            }
             let padded_end = end.div_ceil(8) * 8;
             if namesize == 0 || namesize > 1023 || flags & !7 != 0 || entry[16] != 1 {
                 return Err(invalid("Unsupported bitmap type, flags, or name"));
@@ -125,7 +130,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             if !names.insert(name.clone()) {
                 return Err(invalid("Duplicate bitmap name"));
             }
-            let table_bytes = u32_at(entry, 8) as usize * 8;
+            let table_bytes = (u32_at(entry, 8) as usize)
+                .checked_mul(8)
+                .ok_or("Bitmap table size overflow")?;
             if table_bytes > MAX || table_bytes / 8 < bytes.div_ceil(cs) {
                 return Err(invalid("Invalid bitmap table capacity"));
             }

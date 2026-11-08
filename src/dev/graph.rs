@@ -319,7 +319,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     .get(cursor..cursor + 24)
                     .ok_or_else(|| invalid("Truncated bitmap directory"))?;
                 let table_offset = u64_at(entry, 0);
-                let table_bytes = u32_at(entry, 8) as usize * 8;
+                let table_bytes = (u32_at(entry, 8) as usize)
+                    .checked_mul(8)
+                    .ok_or("Bitmap table size overflow")?;
                 if table_bytes > 32 << 20 {
                     return Err(invalid("Bitmap table exceeds 32 MiB"));
                 }

@@ -9,7 +9,7 @@ fn bit(data: &[u8], n: usize) -> bool {
 }
 fn qemu(path: &std::path::Path, args: &[&str]) {
     let mut command = Command::new("qemu-img");
-    if args[0] == "bitmap" {
+    if matches!(args[0], "bitmap" | "resize") {
         command
             .args(&args[..args.len() - 1])
             .arg(path)
@@ -210,4 +210,27 @@ async fn readonly_and_invalid_bitmap_operations_preserve_image() {
     assert!(dev.create_bitmap("tracking", 9, true).await.is_err());
     assert!(dev.create_bitmap("bad", 64, true).await.is_err());
     assert_eq!(std::fs::read(image.path()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn snapshot_size_restore_resizes_enabled_and_disabled_maps() {
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    qemu(image.path(), &["snapshot", "-c", "small"]);
+    qemu(image.path(), &["resize", "2M"]);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let id = dev.list_snapshots().await.unwrap()[0].id.clone();
+    dev.create_bitmap("enabled", 9, true).await.unwrap();
+    dev.create_bitmap("disabled", 9, false).await.unwrap();
+    dev.restore_snapshot(&id).await.unwrap();
+    assert_eq!(dev.info.virtual_size(), 1 << 20);
+    let enabled = dev.read_bitmap("enabled").await.unwrap();
+    let disabled = dev.read_bitmap("disabled").await.unwrap();
+    assert_eq!(enabled.len(), 256);
+    assert!(enabled.iter().all(|b| *b == 0xff));
+    assert_eq!(disabled.len(), 256);
+    assert!(disabled.iter().all(|b| *b == 0));
+    dev.check().await.unwrap();
+    drop(dev);
+    qemu(image.path(), &["check", "-q"]);
 }

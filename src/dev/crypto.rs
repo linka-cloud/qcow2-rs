@@ -299,11 +299,16 @@ fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
     }
     // Validate algorithms even if no active keyslot matches the credential.
     PayloadCipher::new(Secret::new(&vec![0; key_len]), cipher, mode, false)?;
+    let payload = u64::from(u32_at(data, 104)) * 512;
+    if payload < 4096 || u32_at(data, 164) == 0 || u32_at(data, 164) > 10_000_000 {
+        return Err(invalid("Invalid LUKS payload offset or digest iterations"));
+    }
     let mut ranges = Vec::new();
     for i in 0..8 {
         let p = 208 + i * 48;
         let active = u32_at(data, p);
-        let start = u32_at(data, p + 40) as usize * 512;
+        let start = usize::try_from(u64::from(u32_at(data, p + 40)) * 512)
+            .map_err(|_| invalid("LUKS keyslot offset exceeds addressable memory"))?;
         let stripes = u32_at(data, p + 44) as usize;
         if !matches!(active, 0x00ac71f3 | 0x0000dead) || stripes == 0 || stripes > 65536 {
             return Err(invalid("Invalid LUKS keyslot parameters"));
@@ -314,7 +319,11 @@ fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
             .div_ceil(512)
             * 512;
         let end = start.checked_add(len).ok_or("LUKS keyslot overflow")?;
-        if start < 4096 || end > data.len() || ranges.iter().any(|&(a, b)| start < b && a < end) {
+        if start < 4096
+            || end > data.len()
+            || end as u64 > payload
+            || ranges.iter().any(|&(a, b)| start < b && a < end)
+        {
             return Err(invalid("Invalid or overlapping LUKS keyslot range"));
         }
         ranges.push((start, end));
