@@ -304,6 +304,7 @@ pub struct Qcow2DevParams {
     read_only: bool,
     backing: Option<bool>,
     repair: bool,
+    data_file: Option<std::path::PathBuf>,
 }
 
 impl Qcow2DevParams {
@@ -322,6 +323,7 @@ impl Qcow2DevParams {
             direct_io: dio,
             backing: None,
             repair: false,
+            data_file: None,
         }
     }
 
@@ -334,6 +336,12 @@ impl Qcow2DevParams {
     }
     pub fn is_repair_mode(&self) -> bool {
         self.repair
+    }
+    pub fn set_external_data_file(&mut self, path: std::path::PathBuf) {
+        self.data_file = Some(path);
+    }
+    pub fn external_data_file(&self) -> Option<&std::path::Path> {
+        self.data_file.as_deref()
     }
 
     pub fn set_read_only(&mut self, ro: bool) {

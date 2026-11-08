@@ -97,6 +97,23 @@ pub fn qcow2_backing_is_raw(path: &Path, format: Option<&str>) -> Qcow2Result<bo
     }
 }
 
+pub fn qcow2_external_path(
+    image: &Path,
+    params: &Qcow2DevParams,
+    name: Option<&str>,
+) -> Qcow2Result<PathBuf> {
+    if let Some(path) = params.external_data_file() {
+        return Ok(path.to_path_buf());
+    }
+    let path =
+        PathBuf::from(name.ok_or("External data file requires a name or explicit override")?);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        image.parent().unwrap_or_else(|| Path::new(".")).join(path)
+    })
+}
+
 #[macro_export]
 macro_rules! qcow2_setup_dev_fn {
     ($type:ty, $fn_name: ident) => {
@@ -145,6 +162,16 @@ macro_rules! qcow2_setup_dev_fn {
                     _ => {}
                 };
 
+                if dev.info.external_data() {
+                    let path = qcow2_external_path(path, params, dev.data_file_name())?;
+                    if !ancestors.insert(std::fs::canonicalize(&path)?) {
+                        return Err("External data file aliases image metadata".into());
+                    }
+                    let file =
+                        <$type>::try_new(&path, params.is_read_only(), params.is_direct_io())
+                            .await?;
+                    dev.set_data_file(file)?;
+                }
                 dev.__qcow2_prep_io().await?;
                 Ok(dev)
             }
@@ -204,6 +231,15 @@ macro_rules! qcow2_setup_dev_fn_sync {
                     _ => {}
                 };
 
+                if dev.info.external_data() {
+                    let path = qcow2_external_path(path, params, dev.data_file_name())?;
+                    if !ancestors.insert(std::fs::canonicalize(&path)?) {
+                        return Err("External data file aliases image metadata".into());
+                    }
+                    let file =
+                        <$type>::try_new(&path, params.is_read_only(), params.is_direct_io())?;
+                    dev.set_data_file(file)?;
+                }
                 Ok(dev)
             }
             open_chain(path, params, &mut std::collections::HashSet::new())

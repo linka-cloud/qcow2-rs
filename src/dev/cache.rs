@@ -19,12 +19,15 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         let h = self.header.read().await;
         let lazy = h.compatible_features() & 1 != 0;
-        if h.autoclear_features() == 0 && (!lazy || h.incompatible_features() & 1 != 0) {
+        let preserve = if self.info.raw_data() { 2 } else { 0 };
+        if h.autoclear_features() == preserve && (!lazy || h.incompatible_features() & 1 != 0) {
             return Ok(());
         }
         drop(h);
         let mut header = self.header.write().await;
-        if header.autoclear_features() == 0 && (!lazy || header.incompatible_features() & 1 != 0) {
+        if header.autoclear_features() == preserve
+            && (!lazy || header.incompatible_features() & 1 != 0)
+        {
             return Ok(());
         }
 
@@ -34,12 +37,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if self.call_read(0, &mut buf).await? != buf.len() {
             return Err("Short read while clearing qcow2 autoclear features".into());
         }
-        buf[88..96].fill(0);
+        buf[88..96].copy_from_slice(&preserve.to_be_bytes());
         let flags = header.incompatible_features() | u64::from(lazy);
         buf[72..80].copy_from_slice(&flags.to_be_bytes());
         self.call_write(0, &buf).await?;
         self.call_fsync(0, buf.len(), 0).await?;
-        header.clear_autoclear_features();
+        header.set_autoclear_features(preserve);
         header.set_incompatible_features(flags);
         Ok(())
     }

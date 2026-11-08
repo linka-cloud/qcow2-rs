@@ -194,6 +194,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     }
 
     pub(crate) async fn __qcow2_prep_io(&self) -> Qcow2Result<()> {
+        if self.info.external_data() && self.data_file.is_none() {
+            return Err("External data file must be attached".into());
+        }
         self.load_l1_table().await?;
         self.load_refcount_table().await?;
 

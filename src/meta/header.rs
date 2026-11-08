@@ -494,7 +494,13 @@ impl Qcow2Header {
             return Err("qcow2 raw data flag requires an external data file".into());
         }
 
-        if header.raw.incompatible_features & !19 != 0 {
+        if header.raw.incompatible_features & 4 != 0
+            && (header.nb_snapshots() != 0
+                || header.raw.autoclear_features & 2 != 0 && header.backing_filename().is_some())
+        {
+            return Err("External data conflicts with snapshots or raw data backing files".into());
+        }
+        if header.raw.incompatible_features & !23 != 0 {
             let feats = (0..64)
                 .filter(|bit| header.raw.incompatible_features & (1u64 << bit) != 0)
                 .map(|bit| {
@@ -720,6 +726,9 @@ impl Qcow2Header {
 
     pub(crate) fn clear_autoclear_features(&mut self) {
         self.raw.autoclear_features = 0;
+    }
+    pub(crate) fn set_autoclear_features(&mut self, flags: u64) {
+        self.raw.autoclear_features = flags;
     }
 
     pub fn header_length(&self) -> u32 {

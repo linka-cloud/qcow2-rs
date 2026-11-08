@@ -296,7 +296,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                         continue;
                     }
                     if self.info.raw_data() {
-                        let zeros = vec![0; to - from];
+                        let mut zeros = Qcow2IoBuf::<u8>::new(to - from);
+                        zeros.fill(0);
                         self.data_file
                             .as_ref()
                             .unwrap()

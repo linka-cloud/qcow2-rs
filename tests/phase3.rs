@@ -123,3 +123,64 @@ async fn extended_l2_compressed_clusters_survive_partial_overwrite() {
         d,
     );
 }
+
+#[tokio::test]
+async fn external_data_files_support_offset_zero_raw_consistency_and_override() {
+    for extended in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let d = directory.path();
+        let options = if extended {
+            "data_file=data.raw,data_file_raw=on,extended_l2=on,cluster_size=16384"
+        } else {
+            "data_file=data.raw,data_file_raw=on"
+        };
+        qemu(
+            &["create", "-f", "qcow2", "-o", options, "disk.qcow2", "1M"],
+            d,
+        );
+        let p = Qcow2DevParams::new(9, None, None, false, false);
+        let dev = qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+            .await
+            .unwrap();
+        let mut expected = vec![0; 1 << 20];
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        buf.fill(0xa7);
+        dev.write_at(&buf, 0).await.unwrap();
+        expected[..512].fill(0xa7);
+        dev.write_at(&buf, 65536).await.unwrap();
+        expected[65536..66048].fill(0xa7);
+        dev.write_zeroes(0, 512).await.unwrap();
+        expected[..512].fill(0);
+        let unit = if extended { 512 } else { 65536 };
+        dev.discard(65536, unit).await.unwrap();
+        expected[65536..65536 + unit as usize].fill(0);
+        dev.check().await.unwrap();
+        drop(dev);
+        assert_eq!(std::fs::read(d.join("data.raw")).unwrap(), expected);
+        std::fs::write(d.join("expected.raw"), expected).unwrap();
+        qemu(&["check", "-q", "disk.qcow2"], d);
+        qemu(
+            &[
+                "compare",
+                "-f",
+                "qcow2",
+                "-F",
+                "raw",
+                "disk.qcow2",
+                "expected.raw",
+            ],
+            d,
+        );
+        std::fs::rename(d.join("data.raw"), d.join("moved.raw")).unwrap();
+        assert!(qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+            .await
+            .is_err());
+        let mut p = p.clone();
+        p.set_external_data_file(d.join("moved.raw"));
+        let dev = qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+            .await
+            .unwrap();
+        dev.read_at(&mut buf, 0).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0));
+    }
+}

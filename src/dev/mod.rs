@@ -66,6 +66,7 @@ pub struct Qcow2Dev<T> {
 
     file: T,
     data_file: Option<T>,
+    data_file_name: Option<String>,
     backing_file: Option<Backing<T>>,
     backing_format: Option<String>,
     pub info: Qcow2Info,
@@ -91,6 +92,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         file: T,
     ) -> Qcow2Result<Self> {
         let h = &header;
+        if h.nb_snapshots() != 0 && !params.is_read_only() {
+            return Err("Writable qcow2 images with internal snapshots are not supported".into());
+        }
         let needs_repair = h.incompatible_features() & 3 != 0;
         if needs_repair && !params.is_read_only() && !params.is_repair_mode() {
             return Err("Dirty/corrupt image requires explicit repair mode".into());
@@ -101,9 +105,6 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 h.crypt_method()
             )
             .into());
-        }
-        if h.nb_snapshots() != 0 && !params.is_read_only() {
-            return Err("Writable qcow2 images with internal snapshots are not supported".into());
         }
         let bs_shift = params.get_bs_bits();
 
@@ -116,6 +117,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let rt_size = h.reftable_clusters() << h.cluster_bits();
         let l1_entries = h.l1_table_entries() as u32;
         let backing_format = h.backing_format().cloned();
+        let data_file_name = h
+            .extension_data(0x44415441)
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|_| "Invalid external data file name")?;
 
         log::info!(
             "l2 slice cache(bits: {} count {}), rb cache(bits: {} count {})",
@@ -130,6 +136,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             header: AsyncRwLock::new(header),
             file,
             data_file: None,
+            data_file_name,
             backing_file: None,
             backing_format,
             info,
@@ -173,6 +180,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     pub(crate) fn backing_format(&self) -> Option<&str> {
         self.backing_format.as_deref()
+    }
+    pub(crate) fn data_file_name(&self) -> Option<&str> {
+        self.data_file_name.as_deref()
+    }
+    /// Attach caller-supplied external payload storage before preparing I/O.
+    pub fn set_data_file(&mut self, file: T) -> Qcow2Result<()> {
+        if !self.info.external_data() {
+            return Err("Image has no external data feature".into());
+        }
+        self.data_file = Some(file);
+        Ok(())
     }
 
     pub(crate) fn set_raw_backing(&mut self, file: T, size: u64) {
