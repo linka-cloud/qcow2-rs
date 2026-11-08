@@ -190,6 +190,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if report.dirty || report.corrupt {
             return Err(super::graph::invalid("Image needs dirty/corrupt recovery"));
         }
+        if !report.copied_flag_errors.is_empty() {
+            return Err(super::graph::invalid("Inaccurate active copied flags"));
+        }
         Ok(())
     }
 

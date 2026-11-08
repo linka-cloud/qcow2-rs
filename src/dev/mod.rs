@@ -18,10 +18,12 @@ mod graph;
 mod info;
 mod read;
 mod repair;
+mod snapshots;
 mod write;
 use self::alloc::HostCluster;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};
+pub use self::snapshots::SnapshotOptions;
 
 type L2TableHandle = AsyncRwLock<L2Table>;
 
@@ -92,9 +94,6 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         file: T,
     ) -> Qcow2Result<Self> {
         let h = &header;
-        if h.nb_snapshots() != 0 && !params.is_read_only() {
-            return Err("Writable qcow2 images with internal snapshots are not supported".into());
-        }
         let needs_repair = h.incompatible_features() & 3 != 0;
         if needs_repair && !params.is_read_only() && !params.is_repair_mode() {
             return Err("Dirty/corrupt image requires explicit repair mode".into());

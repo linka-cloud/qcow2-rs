@@ -343,6 +343,9 @@ impl Qcow2DevParams {
     pub fn external_data_file(&self) -> Option<&std::path::Path> {
         self.data_file.as_deref()
     }
+    pub fn clear_external_data_file(&mut self) {
+        self.data_file = None;
+    }
 
     pub fn set_read_only(&mut self, ro: bool) {
         self.read_only = ro;

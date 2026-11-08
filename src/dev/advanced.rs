@@ -38,7 +38,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     "External data files cannot contain compressed clusters",
                 ));
             }
-            if (entry.cluster_offset() != 0 || entry.is_copied())
+            if (entry.cluster_offset() != 0
+                || entry.is_copied()
+                || self.info.extended_l2() && bitmap as u32 != 0)
                 && (entry.cluster_offset() != self.info.cluster_round_down(guest)
                     || !entry.is_copied())
             {
@@ -320,7 +322,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                         self.data_file
                             .as_ref()
                             .ok_or_else(|| invalid("Missing external data file"))?
-                            .write_from(guest, &data)
+                            .write_from(
+                                guest,
+                                &data[..cs.min((self.info.virtual_size() - guest) as usize)],
+                            )
                             .await?;
                         guest
                     } else {

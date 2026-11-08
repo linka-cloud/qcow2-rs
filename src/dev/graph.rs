@@ -45,12 +45,16 @@ pub struct RefcountMismatch {
 #[derive(Debug, Default)]
 pub struct CheckReport {
     pub mismatches: Vec<RefcountMismatch>,
+    pub copied_flag_errors: Vec<u64>,
     pub dirty: bool,
     pub corrupt: bool,
 }
 impl CheckReport {
     pub fn is_clean(&self) -> bool {
-        self.mismatches.is_empty() && !self.dirty && !self.corrupt
+        self.mismatches.is_empty()
+            && self.copied_flag_errors.is_empty()
+            && !self.dirty
+            && !self.corrupt
     }
 }
 
@@ -381,6 +385,39 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
         }
         let flags = self.header.read().await.incompatible_features();
+        let h = self.header.read().await;
+        let (root, entries) = (h.l1_table_offset(), h.l1_table_entries());
+        drop(h);
+        let l1 = self.read_bytes(root, entries * 8).await?;
+        let cs = self.info.cluster_size() as u64;
+        for (i, b) in l1.chunks_exact(8).enumerate() {
+            let value = u64_at(b, 0);
+            let off = value & MASK;
+            let copied = off != 0 && graph.counts.get(&(off / cs)) == Some(&1);
+            if (value & (1 << 63) != 0) != copied {
+                report.copied_flag_errors.push(root + i as u64 * 8);
+            }
+            if off == 0 {
+                continue;
+            }
+            let l2 = self.read_bytes(off, cs as usize).await?;
+            for (j, b) in l2.chunks_exact(self.info.l2_entry_bytes()).enumerate() {
+                let value = u64_at(b, 0);
+                let data = value & MASK;
+                let copied = if self.info.external_data() {
+                    data != 0 || value & (1 << 63) != 0
+                } else {
+                    data != 0
+                        && value & (1 << 62) == 0
+                        && graph.counts.get(&(data / cs)) == Some(&1)
+                };
+                if (value & (1 << 63) != 0) != copied {
+                    report
+                        .copied_flag_errors
+                        .push(off + (j * self.info.l2_entry_bytes()) as u64);
+                }
+            }
+        }
         report.dirty = flags & 1 != 0;
         report.corrupt = flags & 2 != 0;
         Ok(report)

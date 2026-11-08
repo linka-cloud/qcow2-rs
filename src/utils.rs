@@ -146,11 +146,13 @@ macro_rules! qcow2_setup_dev_fn {
                                 .join(back_path)
                         };
                         let mut p = params.clone();
+                        p.clear_external_data_file();
                         p.mark_backing_dev(Some(true));
                         if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
                             if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
                                 return Err("Cycle in qcow2 backing chain".into());
                             }
+                            ancestors.insert(std::fs::canonicalize(&back_path)?);
                             let size = std::fs::metadata(&back_path)?.len();
                             let file = <$type>::try_new(&back_path, true, p.is_direct_io()).await?;
                             dev.set_raw_backing(file, size);
@@ -215,11 +217,13 @@ macro_rules! qcow2_setup_dev_fn_sync {
                                 .join(back_path)
                         };
                         let mut p = params.clone();
+                        p.clear_external_data_file();
                         p.mark_backing_dev(Some(true));
                         if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
                             if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
                                 return Err("Cycle in qcow2 backing chain".into());
                             }
+                            ancestors.insert(std::fs::canonicalize(&back_path)?);
                             let size = std::fs::metadata(&back_path)?.len();
                             let file = <$type>::try_new(&back_path, true, p.is_direct_io())?;
                             dev.set_raw_backing(file, size);

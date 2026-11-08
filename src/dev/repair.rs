@@ -58,6 +58,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let value = u64_at(&l1, i * 8);
             let off = value & super::graph::MASK;
             if off == 0 {
+                put64(&mut l1, i * 8, 0);
                 continue;
             }
             put64(
@@ -165,6 +166,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         if !self.needs_repair.load(Ordering::Acquire) {
             self.flush_meta_locked().await?;
+        } else {
+            // A failed transaction can have unpublished header fields in RAM.
+            // Recovery always follows the last header actually stored on disk.
+            let bytes = self.read_bytes(0, self.info.cluster_size()).await?;
+            *self.header.write().await = Qcow2Header::from_buf(&bytes)?;
+            self.reload_metadata().await?;
         }
         self.graph().await?; // Validate structure before making any changes.
         self.mark_image_dirty().await?;

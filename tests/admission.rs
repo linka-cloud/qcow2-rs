@@ -47,7 +47,7 @@ async fn encrypted_images_are_rejected_without_modification() {
 }
 
 #[tokio::test]
-async fn internal_snapshots_allow_reads_but_reject_writable_open() {
+async fn internal_snapshots_allow_safe_read_and_writable_open() {
     let image = make_temp_qcow2_img(1 << 20, 16, 4);
     let output = Command::new("qemu-img")
         .args(["snapshot", "-c", "baseline"])
@@ -58,10 +58,8 @@ async fn internal_snapshots_allow_reads_but_reject_writable_open() {
     let before = std::fs::read(image.path()).unwrap();
 
     let params = Qcow2DevParams::new(9, None, None, false, false);
-    let err = qcow2_setup_dev_tokio(image.path(), &params)
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("snapshots"), "{err}");
+    let writable = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+    drop(writable);
 
     let params = Qcow2DevParams::new(9, None, None, true, false);
     let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
@@ -74,8 +72,8 @@ async fn internal_snapshots_allow_reads_but_reject_writable_open() {
     #[cfg(not(target_os = "windows"))]
     {
         let params = Qcow2DevParams::new(9, None, None, false, false);
-        let err = qcow2_rs::utils::qcow2_setup_dev_sync(image.path(), &params).unwrap_err();
-        assert!(err.to_string().contains("snapshots"), "{err}");
+        let writable = qcow2_rs::utils::qcow2_setup_dev_sync(image.path(), &params).unwrap();
+        drop(writable);
     }
     assert_eq!(std::fs::read(image.path()).unwrap(), before);
 }

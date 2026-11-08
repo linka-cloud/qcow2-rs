@@ -184,3 +184,125 @@ async fn external_data_files_support_offset_zero_raw_consistency_and_override() 
         assert!(buf.iter().all(|b| *b == 0));
     }
 }
+
+#[tokio::test]
+async fn snapshot_lifecycle_preserves_disk_and_vm_state() {
+    use qcow2_rs::dev::SnapshotOptions;
+    for extended in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let d = directory.path();
+        let options = if extended {
+            "extended_l2=on,cluster_size=16384"
+        } else {
+            "cluster_size=65536"
+        };
+        qemu(
+            &["create", "-f", "qcow2", "-o", options, "disk.qcow2", "1M"],
+            d,
+        );
+        let p = Qcow2DevParams::new(9, None, None, false, false);
+        let dev = qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+            .await
+            .unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        buf.fill(0x5a);
+        dev.write_at(&buf, 0).await.unwrap();
+        let vm_state: Vec<u8> = (0..70017).map(|i| (i % 251) as u8).collect();
+        let snapshot = dev
+            .create_snapshot(
+                SnapshotOptions {
+                    id: "saved".into(),
+                    name: "baseline".into(),
+                    icount: Some(42),
+                    ..Default::default()
+                },
+                &vm_state,
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.vm_state_size, vm_state.len() as u64);
+        let mut state = vec![0; vm_state.len()];
+        assert_eq!(
+            dev.read_snapshot_vm_state("saved", 0, &mut state)
+                .await
+                .unwrap(),
+            vm_state.len()
+        );
+        assert_eq!(state, vm_state);
+        buf.fill(0xa7);
+        dev.write_at(&buf, 0).await.unwrap();
+        dev.check().await.unwrap();
+        drop(dev);
+        qemu(&["check", "-q", "disk.qcow2"], d);
+        qemu(&["snapshot", "-l", "disk.qcow2"], d);
+        let dev = qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+            .await
+            .unwrap();
+        assert_eq!(dev.list_snapshots().await.unwrap()[0].icount, 42);
+        dev.restore_snapshot("saved").await.unwrap();
+        dev.read_at(&mut buf, 0).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0x5a));
+        let mut tail = vec![0; 17];
+        assert_eq!(
+            dev.read_snapshot_vm_state("saved", 70000, &mut tail)
+                .await
+                .unwrap(),
+            17
+        );
+        assert_eq!(tail, vm_state[70000..]);
+        dev.delete_snapshot("saved").await.unwrap();
+        assert!(dev.list_snapshots().await.unwrap().is_empty());
+        dev.check().await.unwrap();
+        drop(dev);
+        qemu(&["check", "-q", "disk.qcow2"], d);
+    }
+}
+
+#[tokio::test]
+async fn qemu_snapshots_allow_safe_writes_and_size_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let d = directory.path();
+    std::fs::write(d.join("source.raw"), vec![0x5a; 1 << 20]).unwrap();
+    qemu(
+        &[
+            "convert",
+            "-f",
+            "raw",
+            "-O",
+            "qcow2",
+            "source.raw",
+            "disk.qcow2",
+        ],
+        d,
+    );
+    qemu(&["snapshot", "-c", "foreign", "disk.qcow2"], d);
+    qemu(&["resize", "disk.qcow2", "2M"], d);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(&d.join("disk.qcow2"), &p)
+        .await
+        .unwrap();
+    let snapshots = dev.list_snapshots().await.unwrap();
+    let id = &snapshots[0].id;
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0xa7);
+    dev.write_at(&buf, 512).await.unwrap();
+    dev.restore_snapshot(id).await.unwrap();
+    assert_eq!(dev.info.virtual_size(), 1 << 20);
+    dev.read_at(&mut buf, 512).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    dev.check().await.unwrap();
+    drop(dev);
+    qemu(&["check", "-q", "disk.qcow2"], d);
+    qemu(
+        &[
+            "compare",
+            "-f",
+            "qcow2",
+            "-F",
+            "raw",
+            "disk.qcow2",
+            "source.raw",
+        ],
+        d,
+    );
+}
