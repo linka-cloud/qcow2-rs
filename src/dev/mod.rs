@@ -21,6 +21,11 @@ pub use self::info::{Qcow2DevParams, Qcow2Info};
 
 type L2TableHandle = AsyncRwLock<L2Table>;
 
+enum Backing<T> {
+    Qcow2(Box<Qcow2Dev<T>>),
+    Raw { file: T, size: u64 },
+}
+
 pub struct Qcow2Dev<T> {
     path: PathBuf,
     header: AsyncRwLock<Qcow2Header>,
@@ -55,7 +60,8 @@ pub struct Qcow2Dev<T> {
     io_lock: AsyncRwLock<()>,
 
     file: T,
-    backing_file: Option<Box<Qcow2Dev<T>>>,
+    backing_file: Option<Backing<T>>,
+    backing_format: Option<String>,
     pub info: Qcow2Info,
 }
 
@@ -63,7 +69,8 @@ impl<T> std::fmt::Debug for Qcow2Dev<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let _ = write!(f, "Image path {:?}\ninfo {:?}\n", &self.path, &self.info);
         let _ = match &self.backing_file {
-            Some(b) => write!(f, "backing {b:?}"),
+            Some(Backing::Qcow2(b)) => write!(f, "backing {b:?}"),
+            Some(Backing::Raw { size, .. }) => write!(f, "raw backing size {size}"),
             _ => write!(f, "backing None"),
         };
         writeln!(f)
@@ -98,6 +105,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             Qcow2Info::__max_l1_size(h.l1_table_entries(), info.cluster_size()).max(1 << bs_shift);
         let rt_size = h.reftable_clusters() << h.cluster_bits();
         let l1_entries = h.l1_table_entries() as u32;
+        let backing_format = h.backing_format().cloned();
 
         log::info!(
             "l2 slice cache(bits: {} count {}), rb cache(bits: {} count {})",
@@ -112,6 +120,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             header: AsyncRwLock::new(header),
             file,
             backing_file: None,
+            backing_format,
             info,
             l1table: AsyncRwLock::new(L1Table::new(None, l1_size, l1_entries, bs_shift)),
             l2cache: AsyncLruCache::new(l2_cache_cnt),
@@ -147,7 +156,15 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Setup the backing Qcow2 device
     pub fn set_backing_dev(&mut self, back: Box<Qcow2Dev<T>>) {
-        self.backing_file = Some(back);
+        self.backing_file = Some(Backing::Qcow2(back));
+    }
+
+    pub(crate) fn backing_format(&self) -> Option<&str> {
+        self.backing_format.as_deref()
+    }
+
+    pub(crate) fn set_raw_backing(&mut self, file: T, size: u64) {
+        self.backing_file = Some(Backing::Raw { file, size });
     }
 
     #[inline(always)]
@@ -165,7 +182,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Prepare everything(loading l1/refcount table) for handling any qcow2 IO
     #[async_recursion(?Send)]
     pub async fn qcow2_prep_io(&self) -> Qcow2Result<()> {
-        if let Some(back) = &self.backing_file {
+        if let Some(Backing::Qcow2(back)) = &self.backing_file {
             back.qcow2_prep_io().await?
         };
         self.__qcow2_prep_io().await

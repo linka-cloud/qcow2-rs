@@ -190,11 +190,11 @@ unmodified bytes and metadata across writes, discard, flush, and reopen.
 
 ## Phase 2: Backing compatibility and complete checking
 
-- [ ] Support raw backing files and honor the declared backing format instead
+- [x] Support raw backing files and honor the declared backing format instead
       of recursively treating every backing file as QCOW2.
-- [ ] Resolve relative backing paths against the containing image directory.
-- [ ] Detect backing cycles and return clear chain-opening errors.
-- [ ] Test multi-level backing chains and zero filling beyond a shorter backing
+- [x] Resolve relative backing paths against the containing image directory.
+- [x] Detect backing cycles and return clear chain-opening errors.
+- [x] Test multi-level backing chains and zero filling beyond a shorter backing
       image, including partial-cluster reads and writes at its boundary.
 - [ ] Build a metadata traversal that calculates exact expected refcounts,
       rather than only testing allocation/non-allocation and leaks.

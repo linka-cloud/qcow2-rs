@@ -135,26 +135,41 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     }
 
     #[inline]
+    pub(crate) async fn read_backing_data(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Qcow2Result<usize> {
+        match self.backing_file.as_ref() {
+            Some(Backing::Qcow2(backing)) => backing.read_at_for_backing(buf, offset).await,
+            Some(Backing::Raw { file, size }) => {
+                buf.fill(0);
+                let valid = size.saturating_sub(offset).min(buf.len() as u64) as usize;
+                if valid != 0 && file.read_to(offset, buf).await? < valid {
+                    return Err("Short read from raw backing file".into());
+                }
+                buf[valid..].fill(0);
+                Ok(buf.len())
+            }
+            None => {
+                buf.fill(0);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    #[inline]
     async fn do_read_backing(
         &self,
         mapping: Mapping,
         off_in_cls: usize,
         buf: &mut [u8],
     ) -> Qcow2Result<usize> {
-        match self.backing_file.as_ref() {
-            Some(backing) => match mapping.cluster_offset {
-                Some(off) => {
-                    backing
-                        .read_at_for_backing(buf, off + off_in_cls as u64)
-                        .await
-                }
-                None => Err("Backing mapping: None offset None".into()),
-            },
-            None => {
-                zero_buf!(buf);
-                Ok(buf.len())
-            }
-        }
+        let offset = mapping
+            .cluster_offset
+            .ok_or("Backing mapping has no offset")?;
+        self.read_backing_data(buf, offset + off_in_cls as u64)
+            .await
     }
 
     #[inline]
@@ -205,58 +220,47 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let mut len = buf.len();
         let old_offset = offset;
         let old_len = len;
-        let single =
-            (offset >> info.cluster_bits()) == ((offset + (len as u64) - 1) >> info.cluster_bits());
+        if len == 0 {
+            return Ok(0);
+        }
+        offset
+            .checked_add(len as u64)
+            .ok_or("Read range overflow")?;
+
+        if (len & bs_mask) != 0 {
+            return Err("un-aligned buffer length".into());
+        }
+        if (offset & bs_mask as u64) != 0 {
+            return Err("un-aligned offset".into());
+        }
 
         if offset >= vsize {
             if !info.is_back_file() {
                 return Err("read_at eof".into());
             } else {
-                // the top device is asking for read, which is usually
-                // caused by top device resize, so simply fake we provide
-                // data requested
+                buf.fill(0);
                 return Ok(buf.len());
             }
         }
 
-        if len == 0 {
-            return Ok(0);
-        }
-
-        if (len & bs_mask) != 0 {
-            return Err("un-aligned buffer length".into());
-        }
-
-        if (offset & (bs_mask as u64)) != 0 {
-            return Err("un-aligned offset".into());
-        }
-
         log::debug!("read_at: offset {:x} len {} >>>", offset, buf.len());
-
-        let extra = if offset + (len as u64) > vsize {
-            // Clamp to the in-image portion: only `vsize - offset` bytes are
-            // backed by data, rounded down to a block boundary.
-            len = ((vsize - offset) as usize) & !bs_mask;
-            if info.is_back_file() {
-                buf.len() - len
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        debug_assert!((len & bs_mask) == 0);
+        let valid = (vsize - offset).min(len as u64) as usize;
+        // Keep underlying I/O aligned even when the virtual size has a
+        // partial final sector. Bytes past the virtual EOF are never exposed.
+        len = valid.align_up(bs).unwrap().min(len);
+        let single =
+            (offset >> info.cluster_bits()) == ((offset + len as u64 - 1) >> info.cluster_bits());
+        let data = &mut buf[..len];
 
         let done = if single {
             let l2_entry = self.get_l2_entry(offset).await?;
 
-            self.do_read(l2_entry, offset, buf).await?
+            self.do_read(l2_entry, offset, data).await?
         } else {
             let nr_clusters = (len >> info.cluster_bits()) + 2;
             let mut reads = Vec::with_capacity(nr_clusters);
             let mut lens = Vec::with_capacity(nr_clusters);
-            let mut remain = buf;
+            let mut remain = data;
             let mut idx = 0;
             let mut s = 0;
             let l2_entries = self.get_l2_entries(offset, len).await?;
@@ -277,15 +281,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
             let res = futures::future::join_all(reads).await;
             for (exp, r) in lens.into_iter().zip(res) {
-                match r {
-                    Ok(r) => {
-                        s += r;
-                        if r != exp {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                };
+                let count = r?;
+                s += count;
+                if count != exp {
+                    break;
+                }
             }
             s
         };
@@ -296,7 +296,15 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             old_len,
             done
         );
-        Ok(done + extra)
+        if info.is_back_file() {
+            if done < valid {
+                return Err("Short read from qcow2 backing image".into());
+            }
+            buf[valid..].fill(0);
+            Ok(old_len)
+        } else {
+            Ok(done.min(valid))
+        }
     }
 
     #[async_recursion(?Send)]

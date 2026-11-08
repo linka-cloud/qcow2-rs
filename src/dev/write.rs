@@ -127,19 +127,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         buf: &[u8],
         host_off: u64,
     ) -> Qcow2Result<()> {
-        match self.backing_file.as_ref() {
-            Some(backing) => {
-                let mut cbuf = Qcow2IoBuf::<u8>::new(self.info.cluster_size());
-
-                // copy & write
-                backing
-                    .read_at(&mut cbuf, virt_off - (off_in_cls as u64))
-                    .await?;
-                cbuf[off_in_cls..off_in_cls + buf.len()].copy_from_slice(buf);
-                self.call_write(host_off, &cbuf).await
-            }
-            None => Err("No backing device found for COW".into()),
-        }
+        let mut cbuf = Qcow2IoBuf::<u8>::new(self.info.cluster_size());
+        self.read_backing_data(&mut cbuf, virt_off - off_in_cls as u64)
+            .await?;
+        cbuf[off_in_cls..off_in_cls + buf.len()].copy_from_slice(buf);
+        self.call_write(host_off, &cbuf).await
     }
 
     /// discard this part iff the pointed host cluster is new

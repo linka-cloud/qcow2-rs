@@ -78,9 +78,25 @@ pub async fn qcow2_alloc_dev<T: Qcow2IoOps>(
     Ok((Qcow2Dev::new(path, header, params, io)?, back_path))
 }
 
-/// Build one async helper which can setup one qcow2 device
-///
-/// The backing device is setup automatically in the built helper.
+/// Honor an explicit backing format; probe QCOW2 magic when it is absent.
+pub fn qcow2_backing_is_raw(path: &Path, format: Option<&str>) -> Qcow2Result<bool> {
+    match format {
+        Some("raw") => Ok(true),
+        Some("qcow2") => Ok(false),
+        Some(other) => Err(format!("Unsupported backing format {other}").into()),
+        None => {
+            use std::io::Read;
+            let mut magic = [0; 4];
+            let mut file = std::fs::File::open(path)?;
+            match file.read_exact(&mut magic) {
+                Ok(()) => Ok(u32::from_be_bytes(magic) != Qcow2Header::QCOW2_MAGIC),
+                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Ok(true),
+                Err(err) => Err(err.into()),
+            }
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! qcow2_setup_dev_fn {
     ($type:ty, $fn_name: ident) => {
@@ -114,8 +130,17 @@ macro_rules! qcow2_setup_dev_fn {
                         };
                         let mut p = params.clone();
                         p.mark_backing_dev(Some(true));
-                        let bdev = open_chain(&back_path, &p, ancestors).await?;
-                        dev.set_backing_dev(Box::new(bdev));
+                        if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
+                            if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
+                                return Err("Cycle in qcow2 backing chain".into());
+                            }
+                            let size = std::fs::metadata(&back_path)?.len();
+                            let file = <$type>::try_new(&back_path, true, p.is_direct_io()).await?;
+                            dev.set_raw_backing(file, size);
+                        } else {
+                            let bdev = open_chain(&back_path, &p, ancestors).await?;
+                            dev.set_backing_dev(Box::new(bdev));
+                        }
                     }
                     _ => {}
                 };
@@ -164,8 +189,17 @@ macro_rules! qcow2_setup_dev_fn_sync {
                         };
                         let mut p = params.clone();
                         p.mark_backing_dev(Some(true));
-                        let bdev = open_chain(&back_path, &p, ancestors)?;
-                        dev.set_backing_dev(Box::new(bdev));
+                        if qcow2_backing_is_raw(&back_path, dev.backing_format())? {
+                            if ancestors.contains(&std::fs::canonicalize(&back_path)?) {
+                                return Err("Cycle in qcow2 backing chain".into());
+                            }
+                            let size = std::fs::metadata(&back_path)?.len();
+                            let file = <$type>::try_new(&back_path, true, p.is_direct_io())?;
+                            dev.set_raw_backing(file, size);
+                        } else {
+                            let bdev = open_chain(&back_path, &p, ancestors)?;
+                            dev.set_backing_dev(Box::new(bdev));
+                        }
                     }
                     _ => {}
                 };
