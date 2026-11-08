@@ -60,7 +60,8 @@ impl CheckReport {
 
 pub(crate) struct Graph {
     pub counts: BTreeMap<u64, u64>,
-    owners: BTreeMap<u64, (&'static str, u64)>,
+    pub owners: BTreeMap<u64, (&'static str, u64)>,
+    pub data_mappings: (usize, usize),
     pub ref_metadata: BTreeSet<u64>,
 }
 impl Graph {
@@ -68,6 +69,7 @@ impl Graph {
         Self {
             counts: BTreeMap::new(),
             owners: BTreeMap::new(),
+            data_mappings: (0, 0),
             ref_metadata: BTreeSet::new(),
         }
     }
@@ -181,7 +183,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
             let name = String::from_utf8(extra[extra_len + id_len..].to_vec())
                 .map_err(|_| invalid("Invalid snapshot name"))?;
-            snapshots.push(Snapshot {
+            let snapshot = Snapshot {
                 id,
                 name,
                 l1_offset: u64_at(&b, 0),
@@ -205,10 +207,25 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     -1
                 },
                 extra_data: extra[..extra_len].to_vec(),
-            });
+            };
+            let coverage = (self.info.cluster_size() * self.info.l2_entries()) as u64;
+            let disk_entries = snapshot.disk_size.div_ceil(coverage);
+            let state_entries = snapshot.vm_state_size.div_ceil(coverage);
+            if snapshot.date_nanoseconds >= 1_000_000_000
+                || snapshot.l1_entries as u64 * 8 > u64::from(Qcow2Header::MAX_L1_SIZE)
+                || disk_entries.saturating_add(state_entries) > u64::from(snapshot.l1_entries)
+            {
+                return Err(invalid(
+                    "Invalid snapshot size, VM-state capacity, or timestamp",
+                ));
+            }
+            snapshots.push(snapshot);
             cursor = (cursor + 40 + extra.len() as u64)
                 .align_up(8_u64)
                 .ok_or_else(|| invalid("Snapshot directory overflow"))?;
+            if cursor - start > 32 << 20 {
+                return Err(invalid("Snapshot directory exceeds 32 MiB"));
+            }
         }
         Ok((snapshots, cursor - start))
     }
@@ -239,6 +256,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 if !self.info.external_data() {
                     if let Some((off, count)) = entry.allocation(self.info.cluster_bits() as u32) {
                         graph.claim("data", off, count as u64 * cs, cs)?;
+                        graph.data_mappings.0 += 1;
+                        graph.data_mappings.1 += usize::from(entry.is_compressed());
                     }
                 }
             }
@@ -286,6 +305,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
             let size = usize::try_from(u64_at(&b, 8))?;
             let off = u64_at(&b, 16);
+            if size > 32 << 20 {
+                return Err(invalid("Bitmap directory exceeds 32 MiB"));
+            }
             graph.claim("bitmap directory", off, size as u64, cs)?;
             let directory = self.read_bytes(off, size).await?;
             let mut cursor = 0;
@@ -295,6 +317,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     .ok_or_else(|| invalid("Truncated bitmap directory"))?;
                 let table_offset = u64_at(entry, 0);
                 let table_bytes = u32_at(entry, 8) as usize * 8;
+                if table_bytes > 32 << 20 {
+                    return Err(invalid("Bitmap table exceeds 32 MiB"));
+                }
                 graph.claim("bitmap table", table_offset, table_bytes as u64, cs)?;
                 let table = self.read_bytes(table_offset, table_bytes).await?;
                 for entry in table.chunks_exact(8) {
@@ -320,6 +345,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if let Some(b) = encryption {
             if b.len() != 16 {
                 return Err(invalid("Invalid encryption header pointer"));
+            }
+            if u64_at(&b, 8) > 32 << 20 {
+                return Err(invalid("Encryption header exceeds 32 MiB"));
             }
             graph.claim("encryption header", u64_at(&b, 0), u64_at(&b, 8), cs)?;
         }
