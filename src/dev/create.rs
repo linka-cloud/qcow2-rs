@@ -104,8 +104,7 @@ impl CreateOptions {
                 || self.extended_l2
                 || self.data_file.is_some()
                 || self.lazy_refcounts
-                || self.compression != CompressionType::Deflate
-                || self.encryption.is_some())
+                || self.compression != CompressionType::Deflate)
         {
             return Err(invalid(
                 "v2 creation requires 16-bit refcounts and basic Deflate layout",
@@ -126,6 +125,15 @@ impl CreateOptions {
             || self.open_params.get_bs_bits() > self.cluster_bits
         {
             return Err(invalid("Creation initialization requires writable buffered parameters with a valid block size"));
+        }
+        if self.encryption.is_some()
+            && (self.size % 512 != 0
+                || self.luks.iterations == 0
+                || self.luks.iterations > 10_000_000)
+        {
+            return Err(invalid(
+                "Encryption requires a sector-aligned size and supported KDF iterations",
+            ));
         }
         for name in self
             .backing

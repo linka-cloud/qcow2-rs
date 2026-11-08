@@ -291,19 +291,21 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     }
 }
 
-fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
+fn luks_keyslot_ranges(data: &[u8]) -> Qcow2Result<Vec<(usize, usize)>> {
     if data.len() < 592 || &data[..6] != b"LUKS\xba\xbe" || u16_at(data, 6) != 1 {
-        return Err(invalid("Unsupported LUKS header/version (expected LUKS1)"));
+        return Err(invalid("Unsupported LUKS header/version"));
     }
-    let cipher = text(&data[8..40])?;
-    let mode = text(&data[40..72])?;
-    let md = digest(text(&data[72..104])?)?;
     let key_len = u32_at(data, 108) as usize;
     if !matches!(key_len, 16 | 24 | 32 | 64) {
         return Err(invalid("Unsupported LUKS key length"));
     }
-    // Validate algorithms even if no active keyslot matches the credential.
-    PayloadCipher::new(Secret::new(&vec![0; key_len]), cipher, mode, false)?;
+    digest(text(&data[72..104])?)?;
+    PayloadCipher::new(
+        Secret::new(&vec![0; key_len]),
+        text(&data[8..40])?,
+        text(&data[40..72])?,
+        false,
+    )?;
     let payload = u64::from(u32_at(data, 104)) * 512;
     if payload < 4096 || u32_at(data, 164) == 0 || u32_at(data, 164) > 10_000_000 {
         return Err(invalid("Invalid LUKS payload offset or digest iterations"));
@@ -336,6 +338,23 @@ fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
         }
         ranges.push((start, end));
     }
+    Ok(ranges)
+}
+
+fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
+    if data.len() < 592 || &data[..6] != b"LUKS\xba\xbe" || u16_at(data, 6) != 1 {
+        return Err(invalid("Unsupported LUKS header/version (expected LUKS1)"));
+    }
+    let cipher = text(&data[8..40])?;
+    let mode = text(&data[40..72])?;
+    let md = digest(text(&data[72..104])?)?;
+    let key_len = u32_at(data, 108) as usize;
+    if !matches!(key_len, 16 | 24 | 32 | 64) {
+        return Err(invalid("Unsupported LUKS key length"));
+    }
+    // Validate algorithms even if no active keyslot matches the credential.
+    PayloadCipher::new(Secret::new(&vec![0; key_len]), cipher, mode, false)?;
+    let ranges = luks_keyslot_ranges(data)?;
     for i in 0..8 {
         let p = 208 + i * 48;
         if u32_at(data, p) != 0x00ac71f3 {
@@ -452,7 +471,7 @@ fn create_luks(password: &[u8], options: &LuksOptions) -> Qcow2Result<(Vec<u8>, 
 }
 
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
-    /// Initialize encryption on an empty v3 image before writing guest data.
+    /// Initialize encryption on an empty v2/v3 image before writing guest data.
     /// This does not encrypt an already populated image in place.
     pub async fn initialize_luks(
         &self,
@@ -461,14 +480,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     ) -> Qcow2Result<()> {
         let _io = self.io_lock.write().await;
         let h = self.header.read().await;
-        if h.version() != 3
-            || h.crypt_method() != 0
-            || h.nb_snapshots() != 0
-            || self.info.raw_data()
-        {
-            return Err(invalid("LUKS initialization requires an empty, unencrypted v3 image without snapshots or raw external data"));
+        if h.crypt_method() != 0 || h.nb_snapshots() != 0 || self.info.raw_data() {
+            return Err(invalid("LUKS initialization requires an empty, unencrypted image without snapshots or raw external data"));
         }
         drop(h);
+        if self.info.virtual_size() % 512 != 0 {
+            return Err(invalid("Encrypted disk size must be sector aligned"));
+        }
         self.flush_meta_locked().await?;
         if self.graph().await?.data_mappings.0 != 0 {
             return Err(invalid("Cannot initialize encryption over allocated data"));
@@ -505,5 +523,215 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             self.needs_repair.store(true, Ordering::Release);
         }
         result
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LuksKeyslot {
+    pub index: usize,
+    pub active: bool,
+    pub iterations: u32,
+    pub stripes: u32,
+}
+fn split_master(master: &[u8], stripes: usize, md: MessageDigest) -> Qcow2Result<Secret> {
+    let mut split = Secret::new(&vec![0; (master.len() * stripes).div_ceil(512) * 512]);
+    openssl::rand::rand_bytes(&mut split.0[..master.len() * (stripes - 1)])
+        .map_err(|_| invalid("AF randomness failed"))?;
+    let mut accumulator = Secret::new(&vec![0; master.len()]);
+    for stripe in split.0[..master.len() * (stripes - 1)].chunks_exact(master.len()) {
+        for (a, b) in accumulator.0.iter_mut().zip(stripe) {
+            *a ^= *b;
+        }
+        diffuse(&mut accumulator.0, md)?;
+    }
+    for (i, b) in master.iter().enumerate() {
+        split.0[master.len() * (stripes - 1) + i] = *b ^ accumulator.0[i];
+    }
+    Ok(split)
+}
+impl<T: Qcow2IoOps> Qcow2Dev<T> {
+    async fn luks_blob(&self) -> Qcow2Result<(u64, Vec<u8>, Vec<(usize, usize)>)> {
+        let h = self.header.read().await;
+        if h.crypt_method() != 2 {
+            return Err(invalid("Keyslot operations require LUKS1 encryption"));
+        }
+        let ext = h
+            .extension_data(0x0537be77)
+            .ok_or("Missing encryption header")?;
+        drop(h);
+        if ext.len() != 16 || u64_at(&ext, 8) > 32 << 20 {
+            return Err(invalid("Invalid LUKS header pointer"));
+        }
+        let host = u64_at(&ext, 0);
+        let bytes = self.read_bytes(host, u64_at(&ext, 8) as usize).await?;
+        let ranges = luks_keyslot_ranges(&bytes)?;
+        Ok((host, bytes, ranges))
+    }
+    pub async fn luks_keyslots(&self) -> Qcow2Result<Vec<LuksKeyslot>> {
+        let _io = self.io_lock.read().await;
+        self.ensure_usable()?;
+        let (_, bytes, _) = self.luks_blob().await?;
+        Ok((0..8)
+            .map(|i| {
+                let p = 208 + i * 48;
+                LuksKeyslot {
+                    index: i,
+                    active: u32_at(&bytes, p) == 0x00ac71f3,
+                    iterations: u32_at(&bytes, p + 4),
+                    stripes: u32_at(&bytes, p + 44),
+                }
+            })
+            .collect())
+    }
+    pub async fn add_luks_keyslot(
+        &self,
+        index: usize,
+        password: impl AsRef<[u8]>,
+        options: LuksOptions,
+    ) -> Qcow2Result<()> {
+        let _io = self.io_lock.write().await;
+        self.add_luks_keyslot_locked(index, password.as_ref(), options)
+            .await
+    }
+    async fn add_luks_keyslot_locked(
+        &self,
+        index: usize,
+        password: &[u8],
+        options: LuksOptions,
+    ) -> Qcow2Result<()> {
+        self.ensure_usable()?;
+        if index >= 8 {
+            return Err(invalid("LUKS keyslot index must be 0..7"));
+        }
+        let (host, mut bytes, ranges) = self.luks_blob().await?;
+        let p = 208 + index * 48;
+        if u32_at(&bytes, p) != 0x0000dead {
+            return Err(invalid("LUKS keyslot is already active"));
+        }
+        let cipher = text(&bytes[8..40])?.to_owned();
+        let mode = text(&bytes[40..72])?.to_owned();
+        let md = digest(text(&bytes[72..104])?)?;
+        let master = self
+            .crypto
+            .read()
+            .await
+            .as_ref()
+            .ok_or("Encryption not initialized")?
+            .key
+            .clone();
+        if master.0.len() != u32_at(&bytes, 108) as usize {
+            return Err(invalid("LUKS master key size mismatch"));
+        }
+        let check = derive(&master.0, &bytes[132..164], u32_at(&bytes, 164), md, 20)?;
+        if !openssl::memcmp::eq(&check.0, &bytes[112..132]) {
+            return Err(invalid("LUKS header no longer matches the unlocked key"));
+        }
+        openssl::rand::rand_bytes(&mut bytes[p + 8..p + 40])
+            .map_err(|_| invalid("Salt generation failed"))?;
+        let key = derive(
+            password,
+            &bytes[p + 8..p + 40],
+            options.iterations,
+            md,
+            master.0.len(),
+        )?;
+        let mut split = split_master(&master.0, u32_at(&bytes, p + 44) as usize, md)?;
+        PayloadCipher::new(key, &cipher, &mode, false)?.apply(0, 0, &mut split.0, true)?;
+        bytes[p + 4..p + 8].copy_from_slice(&options.iterations.to_be_bytes());
+        self.begin_transaction().await?;
+        let result = async {
+            self.write_bytes(host + ranges[index].0 as u64, &split.0)
+                .await?;
+            self.write_bytes(host + p as u64 + 4, &bytes[p + 4..p + 40])
+                .await?;
+            self.call_fsync(0, 0, 0).await?;
+            self.write_bytes(host + p as u64, &0x00ac71f3_u32.to_be_bytes())
+                .await?;
+            self.finish_keyslot_change().await
+        }
+        .await;
+        if result.is_err() {
+            self.needs_repair.store(true, Ordering::Release);
+        }
+        result
+    }
+    pub async fn remove_luks_keyslot(&self, index: usize, allow_last: bool) -> Qcow2Result<()> {
+        let _io = self.io_lock.write().await;
+        self.remove_luks_keyslot_locked(index, allow_last).await
+    }
+    async fn remove_luks_keyslot_locked(&self, index: usize, allow_last: bool) -> Qcow2Result<()> {
+        self.ensure_usable()?;
+        if index >= 8 {
+            return Err(invalid("LUKS keyslot index must be 0..7"));
+        }
+        let (host, bytes, _) = self.luks_blob().await?;
+        let p = 208 + index * 48;
+        if u32_at(&bytes, p) != 0x00ac71f3 {
+            return Err(invalid("LUKS keyslot is not active"));
+        }
+        let active = (0..8)
+            .filter(|i| u32_at(&bytes, 208 + i * 48) == 0x00ac71f3)
+            .count();
+        if active == 1 && !allow_last {
+            return Err(invalid(
+                "Refusing to erase the final LUKS keyslot without explicit permission",
+            ));
+        }
+        self.begin_transaction().await?;
+        let result = async {
+            self.write_bytes(host + p as u64, &0x0000dead_u32.to_be_bytes())
+                .await?;
+            self.call_fsync(0, 0, 0).await?;
+            self.scrub_inactive_luks_keyslots().await?;
+            self.finish_keyslot_change().await
+        }
+        .await;
+        if result.is_err() {
+            self.needs_repair.store(true, Ordering::Release);
+        }
+        result
+    }
+    /// Rotate through a free slot, publishing the replacement before revocation.
+    /// Returns the newly active slot index.
+    pub async fn change_luks_keyslot(
+        &self,
+        index: usize,
+        password: impl AsRef<[u8]>,
+        options: LuksOptions,
+    ) -> Qcow2Result<usize> {
+        let _io = self.io_lock.write().await;
+        self.ensure_usable()?;
+        let (_, bytes, _) = self.luks_blob().await?;
+        if index >= 8 || u32_at(&bytes, 208 + index * 48) != 0x00ac71f3 {
+            return Err(invalid("LUKS keyslot is not active"));
+        }
+        let free = (0..8)
+            .find(|i| u32_at(&bytes, 208 + i * 48) == 0x0000dead)
+            .ok_or("Password rotation needs a free keyslot")?;
+        self.add_luks_keyslot_locked(free, password.as_ref(), options)
+            .await?;
+        self.remove_luks_keyslot_locked(index, false).await?;
+        Ok(free)
+    }
+    async fn finish_keyslot_change(&self) -> Qcow2Result<()> {
+        self.call_fsync(0, 0, 0).await?;
+        let flags = self.header.read().await.incompatible_features();
+        self.store_feature_flags(flags & !3).await?;
+        self.transaction_floor.store(0, Ordering::Release);
+        Ok(())
+    }
+    pub(crate) async fn scrub_inactive_luks_keyslots(&self) -> Qcow2Result<()> {
+        if self.header.read().await.crypt_method() != 2 {
+            return Ok(());
+        }
+        let (host, bytes, ranges) = self.luks_blob().await?;
+        for (i, (from, to)) in ranges.into_iter().enumerate() {
+            if u32_at(&bytes, 208 + i * 48) != 0x0000dead {
+                continue;
+            }
+            let zeros = vec![0; to - from];
+            self.write_bytes(host + from as u64, &zeros).await?;
+        }
+        self.call_fsync(0, 0, 0).await
     }
 }

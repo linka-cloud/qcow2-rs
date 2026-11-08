@@ -36,7 +36,7 @@ pub use self::create::{
     create_qcow2, BackingFile, BackingFormat, CreateOptions, EncryptionFormat, EncryptionSecret,
     ExternalDataFile, ImageCapabilities, Preallocation,
 };
-pub use self::crypto::LuksOptions;
+pub use self::crypto::{LuksKeyslot, LuksOptions};
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};
 pub use self::snapshots::SnapshotOptions;

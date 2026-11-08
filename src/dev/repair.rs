@@ -159,6 +159,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.update_copied_flags(&counts).await?;
         self.call_fsync(0, 0, 0).await?;
         self.reload_metadata().await?;
+        if self.info.encrypted() && self.needs_repair.load(Ordering::Acquire) {
+            self.scrub_inactive_luks_keyslots().await?;
+        }
         if self.info.raw_data() && self.needs_repair.load(Ordering::Acquire) {
             self.reconcile_external_raw().await?;
         }
