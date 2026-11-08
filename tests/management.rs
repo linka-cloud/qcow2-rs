@@ -1,6 +1,10 @@
+mod support;
 use qcow2_rs::{dev::*, helpers::Qcow2IoBuf, utils::qcow2_setup_dev_tokio};
 use std::process::Command;
 fn check(path: &std::path::Path) {
+    if !support::qemu_supports_image(path) {
+        return;
+    }
     let out = Command::new("qemu-img")
         .current_dir(path.parent().unwrap())
         .args(["check", "-q"])

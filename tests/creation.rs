@@ -1,8 +1,12 @@
+mod support;
 use qcow2_rs::dev::*;
 use qcow2_rs::helpers::Qcow2IoBuf;
 use qcow2_rs::utils::qcow2_setup_dev_tokio;
 use std::process::Command;
 fn check(path: &std::path::Path) {
+    if !support::qemu_supports_image(path) {
+        return;
+    }
     let out = Command::new("qemu-img")
         .current_dir(path.parent().unwrap())
         .args(["check", "-q"])
@@ -162,6 +166,9 @@ async fn native_small_clusters_wide_refcounts_backing_and_luks() {
         dev.check().await.unwrap();
         drop(dev);
         std::fs::write(dir.path().join("secret"), b"creation password").unwrap();
+        if !support::qemu_supports_image(&path) {
+            continue;
+        }
         let opts = format!(
             "driver=qcow2,file.filename={},encrypt.key-secret=sec",
             path.display()
