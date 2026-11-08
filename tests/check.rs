@@ -244,3 +244,49 @@ async fn repair_reconstructs_copied_flags_and_preserves_optional_metadata() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+#[tokio::test]
+async fn repair_supports_every_refcount_width() {
+    for order in 0..=6 {
+        let image = make_temp_qcow2_img(1 << 20, 16, order);
+        let p = Qcow2DevParams::new(9, None, None, false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        buf.fill(0xa7);
+        dev.write_at(&buf, 0).await.unwrap();
+        dev.flush_meta().await.unwrap();
+        dev.repair_refcounts().await.unwrap();
+        dev.check().await.unwrap();
+        dev.read_at(&mut buf, 0).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0xa7));
+        drop(dev);
+        let output = std::process::Command::new("qemu-img")
+            .args(["check", "-q"])
+            .arg(image.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "order {order}: {output:?}");
+    }
+}
+
+#[tokio::test]
+async fn interrupted_lazy_refcounts_require_explicit_recovery() {
+    let (image, mut bytes, _, _, _) = fixture().await;
+    bytes[80..88].copy_from_slice(&1_u64.to_be_bytes());
+    std::fs::write(image.path(), bytes).unwrap();
+    let mut p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0x77);
+    // Already mapped storage: guest bytes reach disk even though the device's
+    // lazy transaction has not been closed by flush_meta.
+    dev.write_at(&buf, 512).await.unwrap();
+    drop(dev);
+    assert!(qcow2_setup_dev_tokio(image.path(), &p).await.is_err());
+    p.set_repair_mode(true);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.repair_refcounts().await.unwrap();
+    dev.read_at(&mut buf, 512).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x77));
+    dev.check().await.unwrap();
+}
