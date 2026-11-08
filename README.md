@@ -12,7 +12,13 @@ linux sync IO syscall, tokio and io-uring[^3] with smol[^2] runtime
 - support both direct IO and buffered IO, for direct IO, it needs async
 runtime support, such as tokio doesn't allow it.
 
-- basic read/write function on data file, QCOW2/raw backing chains and Deflate-compressed images
+- v2/v3 read/write, QCOW2/raw backing chains, and Deflate-compressed reads
+
+- internal snapshot management with disk/VM-state preservation, extended L2
+subclusters, external payload files, and precise zero writes
+
+- exact refcount checking and explicit repair, including dirty/lazy-refcount
+recovery, snapshots, and persistent bitmap storage
 
 - l2 table & refcount block load & store in slice way, and the minimized
 slice size is block size, and the maximized size is cluster size
@@ -47,6 +53,62 @@ original return types. Custom backends using the setup macros must provide
 Call `flush_meta()` to persist metadata after writes; dropping the device does
 not flush dirty caches. See [PLAN.md](PLAN.md) for implemented features, current
 limits, validation results, and remaining work.
+
+## Feature support and management
+
+| Feature | Read/write | Create/manage | Check/repair |
+| --- | --- | --- | --- |
+| Basic v2/v3 images, raw/QCOW2 backing | Yes | Basic v3 formatting | Yes |
+| Internal snapshots and VM state | Yes, shared-cluster COW | List/create/delete/restore; VM-state read | Yes |
+| Extended L2 subclusters | Yes, including compressed reads | Open QEMU-created images | Yes |
+| External data files, including raw mode | Yes | Open QEMU-created images; caller path override | Metadata refcounts |
+| Lazy refcounts | Yes, durable dirty-state tracking | Open existing images | Explicit recovery |
+| Deflate compression | Read; overwrite becomes uncompressed | Compressed output pending | Extent accounting |
+| Persistent bitmaps | Stored metadata preserved; consistency invalidated before untracked changes | Tracking/lifecycle pending | Storage accounted for |
+| Zstd and encryption | Unsupported; rejected | Pending | Pending |
+
+`dev.write_zeroes(offset, length)` guarantees zero reads. Advisory discard can
+reveal backing bytes and skips compressed mappings. Extended-L2 discard rounds
+inward to complete subclusters. Snapshot creation needs refcounts wider than one
+bit; external data files cannot have internal snapshots.
+
+Use `dev.create_snapshot(SnapshotOptions { id: "saved".into(),
+name: "baseline".into(), ..Default::default() }, &vm_state).await?`, with
+`SnapshotOptions` from `qcow2_rs::dev`. `list_snapshots`, `restore_snapshot`, and
+`delete_snapshot` use snapshot IDs. `read_snapshot_vm_state(id, offset, buf)`
+streams saved state; restoring a disk does not restore a running VM's state.
+
+For an external payload path override, set
+`params.set_external_data_file(path)` before opening. The declared path otherwise
+resolves relative to the QCOW2 image. Custom backends can attach storage with
+`dev.set_data_file(io)?` before `qcow2_prep_io()`. Setup helpers reject storage
+path aliases across metadata, backing, and external files.
+
+Checking does not modify the image. Flush pending caches before `dev.check()` or
+`dev.check_report()`. To recover a dirty/corrupt image, open writable with
+`params.set_repair_mode(true)` and call `dev.repair_refcounts().await?`. Guest I/O
+is blocked until recovery succeeds. Repair reconstructs refcounts and copied
+flags; malformed structures, ambiguous overlaps, and lost payload bytes require
+other recovery tools.
+
+The CLI exposes these operations:
+
+```sh
+rqcow2 check disk.qcow2
+rqcow2 check --repair disk.qcow2
+rqcow2 snapshot disk.qcow2 create saved --name baseline --vm-state state.bin
+rqcow2 snapshot disk.qcow2 list
+rqcow2 snapshot disk.qcow2 restore saved
+rqcow2 snapshot disk.qcow2 vm-state saved exported-state.bin
+rqcow2 snapshot disk.qcow2 delete saved
+rqcow2 zero disk.qcow2 0 4096
+```
+
+Shared/snapshot, extended-L2, and external writes currently serialize I/O and
+rebuild refcounts after each operation. This prioritizes durable metadata
+ordering and can increase latency and sparse-file growth. Ordinary images keep
+the existing cached write path. Flush excludes guest writes so lazy dirty state
+is cleared only after active writes and metadata are synchronized.
 
 ## Example
 

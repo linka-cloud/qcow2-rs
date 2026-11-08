@@ -2,15 +2,15 @@
 
 Assessment date: 2026-11-08.
 
-Status: **Phase 1 complete; Phase 2 in progress.** Backing-chain compatibility
-is implemented. Exact refcount reconstruction, repair, optional-metadata
-traversal, and dirty/corrupt-image recovery remain Phase 2 work.
+Status: **Phases 1, 2, and 3 complete.** Phase 4 (additional compression,
+encryption, and persistent bitmap management) remains open. See the latest
+checkpoint below for validation and supported limits.
 
 ## Summary and evidence
 
-The library implements core QCOW2 v3 disk I/O, but does not yet support the
-complete QCOW2 format. Some unsupported features are rejected; others are
-accepted without the handling needed to use them safely.
+The initial assessment found core QCOW2 v3 disk I/O and gaps in safe feature
+admission. The implementation now covers Phases 1–3, but does not yet support
+the complete QCOW2 format. Remaining features are tracked in Phase 4.
 
 This plan is based on source and existing-test inspection, compared with the
 [QEMU QCOW2 specification](https://www.qemu.org/docs/master/interop/qcow2.html).
@@ -147,6 +147,72 @@ applicable. QEMU implementation limits can remain where explicitly validated
 and documented. Unsupported or invalid feature combinations must fail with
 clear errors; full support does not mean accepting every combination.
 
+### Phase 2 and Phase 3 completion
+
+| Commit | Change |
+| --- | --- |
+| `051a6e8` | Reconstruct exact reachable refcounts, including snapshots and optional metadata |
+| `10d2740` | Explicit refcount repair, dirty/corrupt recovery, and lazy-refcount dirty transitions |
+| `6d23540` | Extended L2 subclusters, backing fallback, shared metadata/data COW, and precise zero writes |
+| `0af35bf` | External data storage, caller overrides, and raw-data consistency |
+| `ab7f78b` | Internal snapshot list/create/delete/restore, VM state, and copied-flag reconstruction |
+| `eb1a80e` | Aligned subcluster payload reads, including 4 KiB direct I/O and compressed EOF |
+| `8dd904d`, `5e49631` | Recovery failure injection, optional metadata preservation, all refcount widths, and interrupted lazy updates |
+| `4d98892` | Snapshot, VM-state export, and zero-write CLI commands |
+| `e74ace6` | Serialize flush against guest writes before clearing lazy dirty state |
+| `58fc957` | Include inactive snapshots/VM state and optional metadata in usage; bound snapshot geometry and optional objects |
+
+The checker traverses every active and inactive L1/L2 root, compressed extent,
+allocated zero cluster, snapshot directory/VM-state mapping, refcount block,
+and bitmap directory/table/data cluster. It detects storage-role overlaps,
+exact count mismatches, and inaccurate active copied flags. Checking is read-only;
+flush pending caches before checking or collecting usage statistics.
+
+`check_report()` returns structured mismatches and consistency state. Explicit
+`repair_refcounts()` writes replacement refcount metadata in fresh storage and
+publishes it durably before releasing old references. Repair reconstructs
+active copied flags and clears dirty/corrupt markers only after synchronization.
+It rejects ambiguous structural overlaps and malformed mappings rather than
+trying to invent missing guest data. Writable opening of dirty/corrupt images
+requires `Qcow2DevParams::set_repair_mode(true)`; this permits repair, not guest
+I/O before repair. Read-only metadata inspection remains available.
+
+Snapshots preserve identity, disk size, timing, instruction count, opaque extra
+data, and saved VM-state bytes. Native v2/v3 and QEMU-created snapshots are
+supported. Restore switches disk contents/size; callers restore the exported VM
+state in their VM separately. One-bit refcounts cannot represent snapshot
+sharing and are rejected for snapshot creation. Snapshot directories, bitmap
+directories/tables, and other individually read metadata objects have a 32 MiB
+limit in addition to the existing L1/refcount-table limits.
+
+Extended L2 supports 128-bit descriptors, allocation/zero subcluster bitmaps,
+backing fallback, compressed reads/overwrite, and inward-rounded advisory
+discard. External payload files use fixed guest offsets and no QCOW2 payload
+refcounts. Helpers resolve their declared path relative to the metadata image;
+callers can override it with `set_external_data_file` or attach backend storage
+with `set_data_file` before I/O preparation. Raw mode synchronizes actual zero
+bytes for zero/discard and preserves the raw-consistency flag. Missing files,
+path aliases, external snapshots/compression, raw external backing, invalid
+bitmaps, and invalid fixed-offset mappings are rejected.
+
+Shared/snapshot, extended-L2, and external writes currently serialize guest I/O,
+clone affected metadata, and rebuild refcounts after each operation. This favors
+correctness over throughput and can grow the sparse host file. The native
+formatter still creates basic v3 images; use QEMU to create extended-L2/external
+fixtures. Persistent bitmaps are accounted for and preserved by repair, but their
+consistency flag is invalidated before untracked guest changes; tracking and
+bitmap lifecycle management remain Phase 4. Encrypted images and Zstd remain
+unsupported. Torn header writes or missing payload bytes cannot be reconstructed
+by a refcount-only repair.
+
+Validation covers QEMU check/compare and reopen, ordinary/extended snapshots,
+v2 snapshot lifecycle, saved state across cluster boundaries, size restoration,
+external raw/non-raw data and backing, path overrides/aliases, 512-byte
+subclusters with 4 KiB direct I/O, compressed overwrites, malformed bitmaps,
+read-only management, all seven refcount widths, lazy interruption, and injected
+snapshot-COW failure followed by repair. Full-suite and lint results are recorded
+in the final validation checkpoint below.
+
 ## Baseline feature coverage (before Phase 1)
 
 | Feature | Current implementation |
@@ -240,21 +306,21 @@ unmodified bytes and metadata across writes, discard, flush, and reopen.
 - [x] Detect backing cycles and return clear chain-opening errors.
 - [x] Test multi-level backing chains and zero filling beyond a shorter backing
       image, including partial-cluster reads and writes at its boundary.
-- [ ] Build a metadata traversal that calculates exact expected refcounts,
+- [x] Build a metadata traversal that calculates exact expected refcounts,
       rather than only testing allocation/non-allocation and leaks.
 - [x] Report invalid mappings as checker failures. Missing data refcounts now
       return `InvalidData` errors with guest/host offsets instead of only printing
       diagnostics. Allocated zero clusters and all compressed host clusters are
       included in validation and usage accounting.
-- [ ] Cover compressed extents, allocated zero clusters, metadata overlaps,
+- [x] Cover compressed extents, allocated zero clusters, metadata overlaps,
       and all referenced metadata; extend traversal as later features land.
-- [ ] Add explicit repair operations for reconstructing refcounts and resolving
+- [x] Add explicit repair operations for reconstructing refcounts and resolving
       supported inconsistencies. Checking remains read-only by default.
-- [ ] Implement dirty/corrupt state handling and durable dirty-state transitions.
-      Currently every nonzero incompatible-feature bitmap is rejected.
-- [ ] Implement lazy refcounts and recovery. Opening a clean image with the
-      compatible lazy-refcounts flag is not equivalent to implementing lazy
-      updates or dirty-image recovery.
+- [x] Implement dirty/corrupt state handling and durable dirty-state transitions.
+      Dirty/corrupt images require explicit recovery before guest I/O.
+- [x] Implement lazy refcounts and recovery using durable dirty transitions,
+      cached updates, and explicit reachability-based recovery. Flush excludes
+      concurrent writers before marking the image clean.
 
 Acceptance: checker results agree with QEMU for supported fixtures; repair
 restores valid refcounts without changing guest data, including after injected
@@ -264,30 +330,30 @@ write/flush failures.
 
 ### Internal snapshots
 
-- [ ] Parse and preserve snapshot directory entries and their extra data.
-- [ ] Add list/create/delete/restore operations with snapshot identity and size
+- [x] Parse and preserve snapshot directory entries and their extra data.
+- [x] Add list/create/delete/restore operations with snapshot identity and size
       handling, plus VM-state metadata/payload support for complete coverage.
-- [ ] Implement shared L2-table and data-cluster COW, preserving untouched bytes
+- [x] Implement shared L2-table and data-cluster COW, preserving untouched bytes
       during partial writes and releasing old references correctly.
-- [ ] Reconstruct copied flags when switching the active snapshot.
-- [ ] Include snapshot directories, inactive L1/L2 tables, and VM-state storage
+- [x] Reconstruct copied flags when switching the active snapshot.
+- [x] Include snapshot directories, inactive L1/L2 tables, and VM-state storage
       in checking, allocation accounting, and repair.
 
 ### Extended L2 entries
 
-- [ ] Support 128-bit entries and the resulting L1/L2 addressing geometry.
-- [ ] Implement subcluster allocation and zero bitmaps, backing fallback,
+- [x] Support 128-bit entries and the resulting L1/L2 addressing geometry.
+- [x] Implement subcluster allocation and zero bitmaps, backing fallback,
       partial writes, and discard/zero operations.
-- [ ] Preserve compressed-cluster behavior within extended-L2 images.
-- [ ] Validate cluster-size constraints and invalid bitmap combinations.
+- [x] Preserve compressed-cluster behavior within extended-L2 images.
+- [x] Validate cluster-size constraints and invalid bitmap combinations.
 
 ### External data files
 
-- [ ] Parse the data-file extension and allow callers to supply the data file.
-- [ ] Route guest payload I/O to the separate file while keeping metadata in
+- [x] Parse the data-file extension and allow callers to supply the data file.
+- [x] Route guest payload I/O to the separate file while keeping metadata in
       the QCOW2 file; apply fixed guest/host mapping and refcount rules.
-- [ ] Implement raw external-data consistency, including zeroing and discard.
-- [ ] Validate feature combinations and missing/unusable data files.
+- [x] Implement raw external-data consistency, including zeroing and discard.
+- [x] Validate feature combinations and missing/unusable data files.
 
 Acceptance: QEMU-created images can be read, modified, and reopened by both
 implementations; snapshot data remains unchanged after active-image writes.
@@ -319,7 +385,8 @@ implementations; snapshot data remains unchanged after active-image writes.
 - [ ] Add bitmap lifecycle operations and change tracking for writes, zeros,
       discard, snapshot switching, and virtual-size changes as applicable.
 - [ ] Implement `in_use`, enabled/auto, and autoclear consistency behavior.
-- [ ] Include bitmap storage in refcount checking and repair.
+- [x] Include bitmap storage in refcount checking and repair. Directory/table
+      traversal preserves storage; lifecycle/change tracking remains Phase 4.
 
 Acceptance: codec output, encrypted payloads, and persisted bitmap contents
 interoperate with QEMU; interrupted updates are detected through consistency
@@ -360,6 +427,19 @@ behavior during open.
 - [ ] Add regression tests for each Phase 1 issue, especially shared clusters,
       backing-file discard, autoclear invalidation, and v2 header parsing.
 - [ ] Exercise concurrent I/O and the applicable backend/platform matrix.
+
+## Final Phase 2/3 validation checkpoint
+
+- `cargo test --quiet`: **114 passed, 0 failed**, including Linux io_uring.
+- `cargo fmt --check` and `git diff --check`: passed.
+- `cargo clippy --lib --bin rqcow2 --test phase3 --test check --test autoclear
+  --test management_cli --no-deps`: passed with warnings.
+- QEMU checks/guest comparisons pass for the new interoperability fixtures.
+  Extended-L2/external fixtures skip when the installed QEMU predates those
+  features; persistent-bitmap fixtures similarly require QEMU's bitmap command.
+- The previously recorded all-target Clippy failures in older unchanged test
+  helpers remain outside this work. This checkpoint verifies the Linux runtime;
+  it does not claim a new FreeBSD/macOS/Windows execution matrix.
 
 ## Additional image-management parity
 
