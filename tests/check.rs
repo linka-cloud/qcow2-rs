@@ -201,3 +201,46 @@ async fn lazy_refcounts_mark_dirty_until_a_durable_flush() {
     assert_eq!(be64(&std::fs::read(image.path()).unwrap(), 72) & 1, 0);
     dev.check().await.unwrap();
 }
+
+#[tokio::test]
+async fn repair_reconstructs_copied_flags_and_preserves_optional_metadata() {
+    let (image, mut bytes, l2, host, _) = fixture().await;
+    bytes[l2..l2 + 8].copy_from_slice(&(host as u64).to_be_bytes());
+    std::fs::write(image.path(), bytes).unwrap();
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    assert!(!dev
+        .check_report()
+        .await
+        .unwrap()
+        .copied_flag_errors
+        .is_empty());
+    dev.repair_refcounts().await.unwrap();
+    dev.check().await.unwrap();
+    drop(dev);
+    let help = std::process::Command::new("qemu-img")
+        .arg("--help")
+        .output()
+        .unwrap();
+    if !String::from_utf8_lossy(&help.stdout).contains("bitmap") {
+        return;
+    }
+    let output = std::process::Command::new("qemu-img")
+        .args(["bitmap", "--add"])
+        .arg(image.path())
+        .arg("tracking")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.check().await.unwrap();
+    dev.repair_refcounts().await.unwrap();
+    dev.check().await.unwrap();
+    drop(dev);
+    let output = std::process::Command::new("qemu-img")
+        .args(["check", "-q"])
+        .arg(image.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}

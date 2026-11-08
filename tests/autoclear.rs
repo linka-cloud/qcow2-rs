@@ -44,6 +44,7 @@ async fn reads_preserve_autoclear_flags_and_writes_clear_them() {
 
 #[derive(Default)]
 struct State {
+    fail_nth_write: Cell<usize>,
     fail_write: Cell<bool>,
     fail_sync: Cell<bool>,
     events: RefCell<Vec<&'static str>>,
@@ -60,6 +61,13 @@ impl Qcow2IoOps for FaultIo {
     }
 
     async fn write_from(&self, offset: u64, buf: &[u8]) -> Qcow2Result<()> {
+        let nth = self.state.fail_nth_write.get();
+        if nth != 0 {
+            self.state.fail_nth_write.set(nth - 1);
+            if nth == 1 {
+                return Err("injected COW metadata failure".into());
+            }
+        }
         if offset == 0 {
             self.state.events.borrow_mut().push("header");
             if self.state.fail_write.replace(false) {
@@ -189,4 +197,41 @@ async fn discard_invalidates_persistent_bitmap_metadata() {
     assert_eq!(&after[88..96], &[0; 8]);
     assert_eq!(&after[..88], &before[..88]);
     assert_eq!(&after[96..512], &before[96..512]);
+}
+
+#[tokio::test]
+async fn failed_snapshot_cow_requires_recovery_and_preserves_snapshot_data() {
+    use qcow2_rs::dev::SnapshotOptions;
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0x5a);
+    dev.write_at(&buf, 0).await.unwrap();
+    dev.create_snapshot(
+        SnapshotOptions {
+            id: "saved".into(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    drop(dev);
+    let state = Rc::new(State::default());
+    let dev = fault_device(image.path(), state.clone()).await;
+    state.fail_nth_write.set(2);
+    buf.fill(0xa7);
+    assert!(dev.write_at(&buf, 0).await.is_err());
+    assert!(dev.read_at(&mut buf, 0).await.is_err());
+    drop(dev);
+    assert!(qcow2_setup_dev_tokio(image.path(), &p).await.is_err());
+    let mut p = p;
+    p.set_repair_mode(true);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    dev.repair_refcounts().await.unwrap();
+    dev.restore_snapshot("saved").await.unwrap();
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    dev.check().await.unwrap();
 }
