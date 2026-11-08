@@ -1,7 +1,7 @@
 //! Reachability and ownership of every allocated metadata/data cluster.
 use super::*;
 use crate::helpers::{IntAlignment, Qcow2IoBuf};
-use crate::meta::{L1Entry, L2Entry, TableEntry};
+use crate::meta::{L1Entry, TableEntry};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const MASK: u64 = 0x00ff_ffff_ffff_fe00;
@@ -216,7 +216,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         graph.claim("L1", offset, entries as u64 * 8, cs)?;
         let l1 = self.read_bytes(offset, entries * 8).await?;
-        for b in l1.chunks_exact(8) {
+        for (l1_index, b) in l1.chunks_exact(8).enumerate() {
             let entry = L1Entry::try_from_plain(u64_at(b, 0), &self.info)?;
             let off = entry.l2_offset();
             if off == 0 {
@@ -224,10 +224,18 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
             graph.claim("L2", off, cs, cs)?;
             let l2 = self.read_bytes(off, cs as usize).await?;
-            for b in l2.chunks_exact(8) {
-                let entry = L2Entry::try_from_plain(u64_at(b, 0), &self.info)?;
-                if let Some((off, count)) = entry.allocation(self.info.cluster_bits() as u32) {
-                    graph.claim("data", off, count as u64 * cs, cs)?;
+            for (l2_index, b) in l2.chunks_exact(self.info.l2_entry_bytes()).enumerate() {
+                let guest = (l1_index * self.info.l2_entries() + l2_index) as u64 * cs;
+                let bitmap = if self.info.extended_l2() {
+                    u64_at(b, 8)
+                } else {
+                    0
+                };
+                let entry = self.validate_advanced_entry(u64_at(b, 0), bitmap, guest)?;
+                if !self.info.external_data() {
+                    if let Some((off, count)) = entry.allocation(self.info.cluster_bits() as u32) {
+                        graph.claim("data", off, count as u64 * cs, cs)?;
+                    }
                 }
             }
         }

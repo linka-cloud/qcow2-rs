@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+mod advanced;
 mod alloc;
 mod cache;
 mod check;
@@ -64,6 +65,7 @@ pub struct Qcow2Dev<T> {
     io_lock: AsyncRwLock<()>,
 
     file: T,
+    data_file: Option<T>,
     backing_file: Option<Backing<T>>,
     backing_format: Option<String>,
     pub info: Qcow2Info,
@@ -127,6 +129,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             path: path.to_path_buf(),
             header: AsyncRwLock::new(header),
             file,
+            data_file: None,
             backing_file: None,
             backing_format,
             info,

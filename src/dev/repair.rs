@@ -26,6 +26,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.refblock_cache.invalidate();
         self.new_cluster.write().await.clear();
         let h = self.header.read().await;
+        self.info.set_virtual_size(h.size());
         let l1_size = (h.l1_table_entries() * 8)
             .align_up(self.info.cluster_size())
             .unwrap()
@@ -69,11 +70,14 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 },
             );
             let mut l2 = self.read_bytes(off, cs as usize).await?;
-            for entry in l2.chunks_exact_mut(8) {
+            for entry in l2.chunks_exact_mut(self.info.l2_entry_bytes()) {
                 let value = u64_at(entry, 0);
                 let data = value & super::graph::MASK;
-                let copied =
-                    data != 0 && value & (1 << 62) == 0 && counts.get(&(data / cs)) == Some(&1);
+                let copied = if self.info.external_data() {
+                    data != 0 || value & (1 << 63) != 0
+                } else {
+                    data != 0 && value & (1 << 62) == 0 && counts.get(&(data / cs)) == Some(&1)
+                };
                 put64(
                     entry,
                     0,

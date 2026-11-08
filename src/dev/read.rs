@@ -10,6 +10,9 @@ use super::*;
 
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
     pub async fn get_mapping(&self, virtual_offset: u64) -> Qcow2Result<Mapping> {
+        if self.info.extended_l2() || self.info.external_data() {
+            return self.advanced_mapping(virtual_offset).await;
+        }
         let split = SplitGuestOffset(self.info.cluster_round_down(virtual_offset));
         let entry = self.get_l2_entry(virtual_offset).await?;
 
@@ -18,6 +21,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     #[inline]
     pub(crate) async fn get_l2_entry(&self, virtual_offset: u64) -> Qcow2Result<L2Entry> {
+        if self.info.extended_l2() || self.info.external_data() {
+            return Ok(self.advanced_entry(virtual_offset).await?.2);
+        }
         let info = &self.info;
         let split = SplitGuestOffset(virtual_offset);
         let key = split.l2_slice_key(info);
@@ -213,6 +219,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     #[inline]
     async fn __read_at(&self, buf: &mut [u8], mut offset: u64) -> Qcow2Result<usize> {
+        if self.info.extended_l2() || self.info.external_data() {
+            return self.advanced_read_at(buf, offset).await;
+        }
         let info = &self.info;
         let bs = 1 << info.block_size_shift;
         let bs_mask = bs - 1;

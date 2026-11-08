@@ -11,9 +11,7 @@ impl SplitGuestOffset {
 
     #[inline(always)]
     pub fn cluster_offset(&self, info: &Qcow2Info) -> u64 {
-        let cluster_bits = info.cluster_bits();
-        (((self.l1_index(info) as u64) << (cluster_bits - 3)) + self.l2_index(info) as u64)
-            << cluster_bits
+        self.0 & !(info.cluster_size() as u64 - 1)
     }
 
     #[inline(always)]

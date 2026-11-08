@@ -1,6 +1,7 @@
 use crate::error::Qcow2Result;
 use crate::helpers::IntAlignment;
 use crate::meta::Qcow2Header;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// all readable Qcow2 info, make it into single cache line
 #[derive(Debug)]
@@ -26,7 +27,7 @@ pub struct Qcow2Info {
 
     pub(crate) l2_cache_cnt: u32,
     pub(crate) rb_cache_cnt: u32,
-    pub(crate) virtual_size: u64,
+    pub(crate) virtual_size: AtomicU64,
 }
 
 impl Qcow2Info {
@@ -34,6 +35,9 @@ impl Qcow2Info {
     const HAS_BACK_FILE: u16 = 1 << 1; // we have underlying backing image
     const BACK_FILE: u16 = 1 << 2; // this is one backing image, read only
     const VERSION_2: u16 = 1 << 3;
+    const EXTENDED: u16 = 1 << 4;
+    const EXTERNAL: u16 = 1 << 5;
+    const RAW_DATA: u16 = 1 << 6;
     pub fn new(h: &Qcow2Header, p: &Qcow2DevParams) -> Qcow2Result<Qcow2Info> {
         let block_size_shift = p.get_bs_bits();
         if !(9..=12).contains(&block_size_shift) || u32::from(block_size_shift) > h.cluster_bits() {
@@ -92,14 +96,18 @@ impl Qcow2Info {
         let (rb_slice_bits, rb_cache_cnt) =
             cache_geometry(p.rb_cache, 256 << 10, block_size_shift, cluster_shift)?;
 
-        //todo: support extended l2
-        let l2_entries = cluster_size / std::mem::size_of::<u64>();
+        let l2_entries = cluster_size
+            / if h.incompatible_features() & 16 != 0 {
+                16
+            } else {
+                8
+            };
         let l2_slice_entries: u32 = (l2_entries as u32) >> (cluster_shift - l2_slice_bits);
         let rb_entries = cluster_size * 8 / (1 << refcount_order);
         let rb_slice_entries: u32 = (1 << (rb_slice_bits + 3)) >> refcount_order;
 
         Ok(Qcow2Info {
-            virtual_size: h.size(),
+            virtual_size: AtomicU64::new(h.size()),
             refcount_order,
             cluster_shift,
             l2_slice_entries,
@@ -114,6 +122,21 @@ impl Qcow2Info {
             l2_cache_cnt: l2_cache_cnt.try_into()?,
             rb_cache_cnt: rb_cache_cnt.try_into()?,
             flags: if ro { Qcow2Info::READ_ONLY } else { 0 }
+                | if h.incompatible_features() & 16 != 0 {
+                    Self::EXTENDED
+                } else {
+                    0
+                }
+                | if h.incompatible_features() & 4 != 0 {
+                    Self::EXTERNAL
+                } else {
+                    0
+                }
+                | if h.autoclear_features() & 2 != 0 {
+                    Self::RAW_DATA
+                } else {
+                    0
+                }
                 | if h.backing_filename().is_some() {
                     Qcow2Info::HAS_BACK_FILE
                 } else {
@@ -141,12 +164,31 @@ impl Qcow2Info {
 
     #[inline(always)]
     pub fn l2_entries(&self) -> usize {
-        self.cluster_size() / std::mem::size_of::<u64>()
+        self.cluster_size() / self.l2_entry_bytes()
     }
 
     #[inline(always)]
     pub fn virtual_size(&self) -> u64 {
-        self.virtual_size
+        self.virtual_size.load(Ordering::Acquire)
+    }
+    pub fn extended_l2(&self) -> bool {
+        self.flags & Self::EXTENDED != 0
+    }
+    pub fn external_data(&self) -> bool {
+        self.flags & Self::EXTERNAL != 0
+    }
+    pub fn raw_data(&self) -> bool {
+        self.flags & Self::RAW_DATA != 0
+    }
+    pub fn l2_entry_bytes(&self) -> usize {
+        if self.extended_l2() {
+            16
+        } else {
+            8
+        }
+    }
+    pub(crate) fn set_virtual_size(&self, size: u64) {
+        self.virtual_size.store(size, Ordering::Release);
     }
 
     #[inline(always)]
@@ -200,7 +242,7 @@ impl Qcow2Info {
     #[inline(always)]
     pub(crate) fn max_l1_entries(&self) -> usize {
         Self::__max_l1_entries(
-            self.virtual_size,
+            self.virtual_size(),
             self.cluster_shift as usize,
             self.l2_entries(),
         )

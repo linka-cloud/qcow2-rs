@@ -295,7 +295,11 @@ impl TableEntry for L2Entry {
         if qcow2_info.is_v2() && !entry.is_compressed() && entry.is_zero() {
             return Err("Zero-cluster flags are not valid in qcow2 v2".into());
         }
-        if !entry.is_compressed() && entry.is_copied() && entry.cluster_offset() == 0 {
+        if !entry.is_compressed()
+            && entry.is_copied()
+            && entry.cluster_offset() == 0
+            && !qcow2_info.external_data()
+        {
             return Err("qcow2 L2 copied flag requires a data allocation".into());
         }
         if entry.is_compressed() {

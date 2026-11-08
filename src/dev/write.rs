@@ -660,7 +660,37 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Write data in `buf` to the virtual `offset` of this qcow2 image
     pub async fn write_at(&self, buf: &[u8], offset: u64) -> Qcow2Result<()> {
-        let _io = self.io_lock.read().await;
-        self.__write_at(buf, offset).await
+        let io = self.io_lock.read().await;
+        self.ensure_usable()?;
+        let mut advanced = self.info.extended_l2()
+            || self.info.external_data()
+            || self.header.read().await.nb_snapshots() != 0;
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .filter(|n| *n <= self.info.virtual_size())
+            .ok_or("Write beyond virtual EOF")?;
+        if !advanced && !buf.is_empty() {
+            for off in (self.info.cluster_round_down(offset)..end).step_by(self.info.cluster_size())
+            {
+                let entry = self.get_l2_entry(off).await?;
+                let l1 = self.get_l1_entry(&SplitGuestOffset(off)).await?;
+                if !l1.is_zero() && !l1.is_copied()
+                    || entry.cluster_offset() != 0
+                        && !entry.is_compressed()
+                        && (!entry.is_copied() || entry.is_zero())
+                {
+                    advanced = true;
+                    break;
+                }
+            }
+        }
+        if advanced {
+            drop(io);
+            let _io = self.io_lock.write().await;
+            self.advanced_modify(offset, buf.len(), super::advanced::Mutation::Write(buf))
+                .await
+        } else {
+            self.__write_at(buf, offset).await
+        }
     }
 }

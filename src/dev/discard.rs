@@ -35,6 +35,31 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// but must not reclaim a cluster still referenced by a durable mapping.
     pub async fn discard(&self, virtual_offset: u64, len: u64) -> Qcow2Result<()> {
         let _io = self.io_lock.write().await;
+        if self.info.extended_l2()
+            || self.info.external_data()
+            || self.header.read().await.nb_snapshots() != 0
+        {
+            let end = virtual_offset
+                .saturating_add(len)
+                .min(self.info.virtual_size());
+            let unit = if self.info.extended_l2() {
+                self.info.cluster_size() / 32
+            } else {
+                self.info.cluster_size()
+            } as u64;
+            let start = virtual_offset.div_ceil(unit).saturating_mul(unit);
+            let end = end / unit * unit;
+            if end <= start {
+                return Ok(());
+            }
+            return self
+                .advanced_modify(
+                    start,
+                    (end - start) as usize,
+                    super::advanced::Mutation::Discard,
+                )
+                .await;
+        }
         let info = &self.info;
         let cluster_size = info.cluster_size() as u64;
 

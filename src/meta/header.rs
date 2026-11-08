@@ -301,11 +301,24 @@ impl Qcow2Header {
             return Err("qcow2 header exceeds the first cluster".into());
         }
         let l1_bytes = u64::from(header.l1_size) * 8;
-        let max_virtual = u64::from(Self::MAX_L1_SIZE / 8) * (cluster_size / 8) * cluster_size;
+        let l2_width = if header.incompatible_features & 16 != 0 {
+            16
+        } else {
+            8
+        };
+        if l2_width == 16 && cluster_bits < 14 {
+            return Err("Extended L2 requires at least 16 KiB clusters".into());
+        }
+        let max_virtual =
+            u64::from(Self::MAX_L1_SIZE / 8) * (cluster_size / l2_width) * cluster_size;
         if l1_bytes > u64::from(Self::MAX_L1_SIZE) || header.size > max_virtual {
             return Err("qcow2 L1 table or virtual size exceeds the supported limit".into());
         }
-        if header.size.div_ceil((cluster_size / 8) * cluster_size) > u64::from(header.l1_size) {
+        if header
+            .size
+            .div_ceil((cluster_size / l2_width) * cluster_size)
+            > u64::from(header.l1_size)
+        {
             return Err("qcow2 L1 table is too small for the virtual size".into());
         }
         let rt_bytes = u64::from(header.refcount_table_clusters) * cluster_size;
@@ -481,7 +494,7 @@ impl Qcow2Header {
             return Err("qcow2 raw data flag requires an external data file".into());
         }
 
-        if header.raw.incompatible_features & !3 != 0 {
+        if header.raw.incompatible_features & !19 != 0 {
             let feats = (0..64)
                 .filter(|bit| header.raw.incompatible_features & (1u64 << bit) != 0)
                 .map(|bit| {
