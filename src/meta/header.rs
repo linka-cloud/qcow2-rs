@@ -192,11 +192,9 @@ numerical_enum! {
 
 impl Qcow2RawHeader {
     pub fn serialize_vec(&mut self) -> Qcow2Result<Vec<u8>> {
-        self.header_length = if self.version == 2 {
-            72
-        } else {
-            size_of::<Self>().align_up(8usize).unwrap().try_into()?
-        };
+        if self.version == 2 {
+            self.header_length = 72;
+        }
 
         let bincode = bincode::DefaultOptions::new()
             .with_fixint_encoding()
@@ -240,6 +238,8 @@ pub enum Qcow2HeaderExtension {
 #[derive(Debug)]
 pub struct Qcow2Header {
     raw: Qcow2RawHeader,
+    // Preserve optional fields introduced after the last field we understand.
+    unknown_header_fields: Vec<u8>,
     backing_filename: Option<String>,
     extensions: Vec<Qcow2HeaderExtension>,
 }
@@ -388,8 +388,14 @@ impl Qcow2Header {
             extensions.push(extension);
         }
 
+        let unknown_header_fields = if version == 3 && header.header_length > 105 {
+            header_buf[105..header.header_length as usize].to_vec()
+        } else {
+            Vec::new()
+        };
         let header = Qcow2Header {
             raw: header,
+            unknown_header_fields,
             backing_filename,
             extensions,
         };
@@ -552,11 +558,7 @@ impl Qcow2Header {
     }
 
     pub fn serialize_to_buf(&mut self) -> Qcow2Result<Vec<u8>> {
-        let header_len = if self.raw.version == 2 {
-            72
-        } else {
-            size_of::<Qcow2RawHeader>().align_up(8usize).unwrap()
-        };
+        let header_len = self.raw.header_length as usize;
         let mut header_exts = self.serialize_extensions()?;
 
         if let Some(backing) = self.backing_filename.as_ref() {
@@ -568,6 +570,9 @@ impl Qcow2Header {
         }
 
         let mut full_buf = self.raw.serialize_vec()?;
+        if !self.unknown_header_fields.is_empty() {
+            full_buf[105..header_len].copy_from_slice(&self.unknown_header_fields);
+        }
         full_buf.append(&mut header_exts);
         if let Some(backing) = self.backing_filename.as_ref() {
             full_buf.extend_from_slice(backing.as_bytes());
@@ -838,6 +843,40 @@ mod tests {
         let mut buf = minimal_header(3, 104);
         buf[96..100].copy_from_slice(&7_u32.to_be_bytes());
         assert!(Qcow2Header::from_buf(&buf).is_err());
+    }
+
+    #[test]
+    fn test_preserve_unknown_header_fields_and_extensions() {
+        for length in [104, 112, 128] {
+            let mut buf = minimal_header(3, length);
+            if length > 112 {
+                buf[112..length as usize].fill(0xa5);
+            }
+            let mut header = Qcow2Header::from_buf(&buf).unwrap();
+            header.backing_filename = Some("base.qcow2".to_owned());
+            header.extensions.push(Qcow2HeaderExtension::Unknown {
+                extension_type: 0x12345678,
+                data: vec![1, 2, 3],
+            });
+            header.set_l1_table(512, 1).unwrap();
+            let serialized = header.serialize_to_buf().unwrap();
+            let header = Qcow2Header::from_buf(&serialized).unwrap();
+            assert_eq!(header.header_length(), length);
+            if length > 104 {
+                assert_eq!(
+                    &serialized[105..length as usize],
+                    &buf[105..length as usize]
+                );
+            }
+            assert_eq!(header.backing_filename().unwrap(), "base.qcow2");
+            assert_eq!(header.l1_table_offset(), 512);
+            assert!(
+                matches!(&header.extensions[0], Qcow2HeaderExtension::Unknown {
+                extension_type: 0x12345678,
+                data,
+            } if data == &[1, 2, 3])
+            );
+        }
     }
 
     #[test]

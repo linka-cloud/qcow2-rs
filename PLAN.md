@@ -78,7 +78,7 @@ Address these before advertising broader feature support:
 - [ ] Accept only supported format versions and validate header lengths,
       refcount orders, offsets, sizes, extension bounds, and reserved fields
       before using them. Return errors rather than panicking on malformed input.
-- [ ] Preserve unknown additional header fields when rewriting the header.
+- [x] Preserve unknown additional header fields when rewriting the header.
       Unknown extensions are already retained as opaque data; extend this
       preservation to unknown header bytes.
 - [ ] Fix cache geometry for clusters smaller than the default 4 KiB slice,
