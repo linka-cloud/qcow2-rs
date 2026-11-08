@@ -293,6 +293,7 @@ async fn failed_bitmap_save_is_explicitly_inconsistent_after_refcount_repair() {
     buf.fill(0x5a);
     assert!(dev.write_at(&buf, 0).await.is_err());
     assert!(dev.list_bitmaps().await.unwrap()[0].in_use);
+    assert!(dev.read_bitmap("tracking").await.is_err());
     assert!(dev.read_at(&mut buf, 0).await.is_err());
     dev.repair_refcounts().await.unwrap();
     assert!(dev.read_bitmap("tracking").await.is_err());

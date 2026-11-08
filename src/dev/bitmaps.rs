@@ -310,6 +310,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Raw bitmap bytes; bit zero is the least significant bit of byte zero.
     pub async fn read_bitmap(&self, name: &str) -> Qcow2Result<Vec<u8>> {
         let _io = self.io_lock.read().await;
+        self.ensure_usable()?;
         let map = self
             .load_bitmaps()
             .await?
