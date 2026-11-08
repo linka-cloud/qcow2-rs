@@ -238,6 +238,7 @@ async fn malformed_luks_parameters_fail_before_mutation() {
         (164, 0_u32.to_be_bytes().to_vec()),
         (248, u32::MAX.to_be_bytes().to_vec()),
         (252, u32::MAX.to_be_bytes().to_vec()),
+        (256, 0x00ac71f3_u32.to_be_bytes().to_vec()),
     ] {
         let mut bytes = original.clone();
         bytes[header + offset..header + offset + value.len()].copy_from_slice(&value);
@@ -249,6 +250,15 @@ async fn malformed_luks_parameters_fail_before_mutation() {
         assert!(!error.contains("private credential"));
         assert_eq!(std::fs::read(image.path()).unwrap(), bytes);
     }
+    let mut bytes = original.clone();
+    bytes[at + 8..at + 16].copy_from_slice(&((header + 512) as u64).to_be_bytes());
+    std::fs::write(image.path(), &bytes).unwrap();
+    let error = qcow2_setup_dev_tokio(image.path(), &p)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("LUKS header pointer"), "{error}");
+    assert_eq!(std::fs::read(image.path()).unwrap(), bytes);
 }
 
 #[tokio::test]

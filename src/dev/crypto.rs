@@ -208,7 +208,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             PayloadCipher::new(key, "aes", "cbc-plain64", true)?
         } else {
             let ext = extension.ok_or_else(|| invalid("Missing LUKS header pointer"))?;
-            if ext.len() != 16 || u64_at(&ext, 8) < 592 || u64_at(&ext, 8) > 32 << 20 {
+            if ext.len() != 16
+                || u64_at(&ext, 0) == 0
+                || u64_at(&ext, 0) % self.info.cluster_size() as u64 != 0
+                || u64_at(&ext, 8) < 592
+                || u64_at(&ext, 8) > 32 << 20
+            {
                 return Err(invalid("Invalid LUKS header pointer"));
             }
             let data = self
@@ -312,6 +317,9 @@ fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
         let stripes = u32_at(data, p + 44) as usize;
         if !matches!(active, 0x00ac71f3 | 0x0000dead) || stripes == 0 || stripes > 65536 {
             return Err(invalid("Invalid LUKS keyslot parameters"));
+        }
+        if active == 0x00ac71f3 && (u32_at(data, p + 4) == 0 || u32_at(data, p + 4) > 10_000_000) {
+            return Err(invalid("Unsupported LUKS keyslot iteration count"));
         }
         let len = key_len
             .checked_mul(stripes)
