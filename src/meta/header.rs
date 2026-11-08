@@ -5,7 +5,7 @@ use crate::helpers::IntAlignment;
 use crate::numerical_enum;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -277,7 +277,7 @@ impl Qcow2Header {
             header.header_length = 72;
         } else {
             let length = header.header_length as usize;
-            if length < 104 || length % 8 != 0 || length > header_buf.len() {
+            if length < 104 || length & 7 != 0 || length > header_buf.len() {
                 return Err("Invalid qcow2 header length".into());
             }
             if length > 104 {
@@ -321,6 +321,9 @@ impl Qcow2Header {
 
         let backing_filename = if header.backing_file_offset != 0 {
             let (offset, length) = (header.backing_file_offset, header.backing_file_size);
+            if offset < header.header_length as u64 {
+                return Err("Backing file name overlaps the qcow2 header".into());
+            }
             if length > 1023 {
                 return Err(format!(
                     "Backing file name is too long ({length}, must not exceed 1023)"
@@ -331,7 +334,7 @@ impl Qcow2Header {
             let end = offset
                 .checked_add(length as u64)
                 .ok_or("Backing file name offset is invalid (too high)")?;
-            if end >= cluster_size {
+            if end > cluster_size {
                 return Err("Backing file name offset is invalid (too high)".into());
             }
 
@@ -355,6 +358,7 @@ impl Qcow2Header {
             cluster_size
         };
         let mut extensions = Vec::<Qcow2HeaderExtension>::new();
+        let mut extension_types = HashSet::new();
         while ext_offset < ext_end {
             let max_len = ext_offset + size_of::<Qcow2HeaderExtensionHeader>() as u64;
             if max_len > ext_end || max_len > header_buf.len() as u64 {
@@ -370,6 +374,13 @@ impl Qcow2Header {
             ext_offset += size_of::<Qcow2HeaderExtensionHeader>() as u64;
 
             let ext_hdr: Qcow2HeaderExtensionHeader = bincode.deserialize(ext_hdr_buf)?;
+            let extension_type = ext_hdr.extension_type;
+            if extension_type == Qcow2HeaderExtensionType::End as u32 && ext_hdr.length != 0 {
+                return Err("qcow2 extension end marker has a payload".into());
+            }
+            if !extension_types.insert(extension_type) {
+                return Err(format!("Duplicate qcow2 header extension {extension_type:#x}").into());
+            }
             let max_len = ext_offset + ext_hdr.length as u64;
             if max_len > ext_end || max_len > header_buf.len() as u64 {
                 return Err("Header extensions exceed the first cluster or buffer length".into());
@@ -379,6 +390,9 @@ impl Qcow2Header {
                 [ext_offset as usize..ext_offset as usize + ext_hdr.length as usize]
                 .to_vec();
             ext_offset += (ext_hdr.length as u64).align_up(8u64).unwrap();
+            if ext_offset > ext_end || ext_offset > header_buf.len() as u64 {
+                return Err("qcow2 extension padding exceeds the extension area".into());
+            }
 
             let extension = match Qcow2HeaderExtension::from(ext_hdr.extension_type, ext_data)? {
                 Some(ext) => ext,
@@ -721,6 +735,9 @@ impl Qcow2HeaderExtension {
                     Qcow2HeaderExtension::BackingFileFormat(fmt)
                 }
                 Qcow2HeaderExtensionType::FeatureNameTable => {
+                    if !data.chunks_exact(48).remainder().is_empty() {
+                        return Err("Invalid qcow2 feature name table length".into());
+                    }
                     let mut feats = HashMap::new();
                     for feat in data.chunks(48) {
                         let feat_type: Qcow2FeatureType = match feat[0].try_into() {
@@ -842,6 +859,57 @@ mod tests {
         }
         let mut buf = minimal_header(3, 104);
         buf[96..100].copy_from_slice(&7_u32.to_be_bytes());
+        assert!(Qcow2Header::from_buf(&buf).is_err());
+    }
+
+    #[test]
+    fn test_malformed_header_extensions_return_errors() {
+        for length in [1_u32, 2, 47, 49] {
+            let mut buf = minimal_header(3, 104);
+            buf[104..108].copy_from_slice(&0x6803f857_u32.to_be_bytes());
+            buf[108..112].copy_from_slice(&length.to_be_bytes());
+            assert!(Qcow2Header::from_buf(&buf).is_err());
+        }
+
+        // End markers cannot have a payload.
+        let mut buf = minimal_header(3, 104);
+        buf[108..112].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(Qcow2Header::from_buf(&buf).is_err());
+
+        // Extension padding must not run into a backing name.
+        let mut buf = minimal_header(3, 104);
+        buf[8..16].copy_from_slice(&115_u64.to_be_bytes());
+        buf[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        buf[104..108].copy_from_slice(&0xe2792aca_u32.to_be_bytes());
+        buf[108..112].copy_from_slice(&1_u32.to_be_bytes());
+        buf[112] = b'x';
+        buf[115] = b'y';
+        assert!(Qcow2Header::from_buf(&buf).is_err());
+
+        // Defined extension types may only occur once.
+        let mut buf = minimal_header(3, 104);
+        for offset in [104, 120] {
+            buf[offset..offset + 4].copy_from_slice(&0xe2792aca_u32.to_be_bytes());
+            buf[offset + 4..offset + 8].copy_from_slice(&3_u32.to_be_bytes());
+            buf[offset + 8..offset + 11].copy_from_slice(b"raw");
+        }
+        assert!(Qcow2Header::from_buf(&buf).is_err());
+    }
+
+    #[test]
+    fn test_backing_name_bounds() {
+        let mut buf = minimal_header(3, 104);
+        buf[8..16].copy_from_slice(&504_u64.to_be_bytes());
+        buf[16..20].copy_from_slice(&8_u32.to_be_bytes());
+        buf[504..].copy_from_slice(b"base.raw");
+        assert_eq!(
+            Qcow2Header::from_buf(&buf)
+                .unwrap()
+                .backing_filename()
+                .unwrap(),
+            "base.raw"
+        );
+        buf[8..16].copy_from_slice(&32_u64.to_be_bytes());
         assert!(Qcow2Header::from_buf(&buf).is_err());
     }
 
