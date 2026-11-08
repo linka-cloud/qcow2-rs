@@ -97,7 +97,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                         let n = cs.min(vm_state.len() - done);
                         let mut data = vec![0; cs];
                         data[..n].copy_from_slice(&vm_state[done..done + n]);
-                        let host = self.allocate_object(&data).await?;
+                        let host = self
+                            .allocate_payload(
+                                &data,
+                                (index * self.info.l2_entries() + slot) as u64 * cs as u64,
+                            )
+                            .await?;
                         put64(&mut l2, slot * self.info.l2_entry_bytes(), (1 << 63) | host);
                         if self.info.extended_l2() {
                             put64(&mut l2, slot * 16 + 8, u32::MAX as u64);
@@ -259,7 +264,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     && (!self.info.extended_l2() || bitmap & (1_u64 << (in_cluster / unit)) != 0)
                 {
                     let data = self
-                        .read_bytes(entry.cluster_offset() + in_cluster as u64, n)
+                        .read_payload(
+                            entry.cluster_offset() + in_cluster as u64,
+                            (first * self.info.l2_entries() as u64 + cluster) * cs as u64
+                                + in_cluster as u64,
+                            n,
+                        )
                         .await?;
                     buf[done..done + n].copy_from_slice(&data);
                 }

@@ -95,6 +95,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if self.info.external_data() && self.data_file.is_none() {
             return Err("External data file must be attached".into());
         }
+        self.prepare_crypto().await?;
         self.load_l1_table().await?;
         self.load_refcount_table().await?;
 

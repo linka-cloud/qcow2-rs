@@ -1,7 +1,7 @@
 use crate::error::Qcow2Result;
 use crate::helpers::IntAlignment;
 use crate::meta::Qcow2Header;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// all readable Qcow2 info, make it into single cache line
 #[derive(Debug)]
@@ -20,6 +20,7 @@ pub struct Qcow2Info {
     pub(crate) rb_slice_index_shift: u8,
 
     pub(crate) flags: u16,
+    encrypted: AtomicBool,
     pub(crate) l2_slice_entries: u32,
     pub(crate) in_cluster_offset_mask: usize,
     pub(crate) l2_index_mask: usize,
@@ -121,6 +122,7 @@ impl Qcow2Info {
             l2_slice_bits,
             l2_cache_cnt: l2_cache_cnt.try_into()?,
             rb_cache_cnt: rb_cache_cnt.try_into()?,
+            encrypted: AtomicBool::new(h.crypt_method() != 0),
             flags: if ro { Qcow2Info::READ_ONLY } else { 0 }
                 | if h.incompatible_features() & 16 != 0 {
                     Self::EXTENDED
@@ -170,6 +172,12 @@ impl Qcow2Info {
     #[inline(always)]
     pub fn virtual_size(&self) -> u64 {
         self.virtual_size.load(Ordering::Acquire)
+    }
+    pub fn encrypted(&self) -> bool {
+        self.encrypted.load(Ordering::Acquire)
+    }
+    pub(crate) fn set_encrypted(&self, enabled: bool) {
+        self.encrypted.store(enabled, Ordering::Release);
     }
     pub fn extended_l2(&self) -> bool {
         self.flags & Self::EXTENDED != 0
@@ -305,6 +313,8 @@ pub struct Qcow2DevParams {
     backing: Option<bool>,
     repair: bool,
     data_file: Option<std::path::PathBuf>,
+    pub(crate) encryption_secret: Option<super::crypto::Secret>,
+    pub(crate) image_secrets: std::collections::HashMap<std::path::PathBuf, super::crypto::Secret>,
 }
 
 impl Qcow2DevParams {
@@ -324,9 +334,27 @@ impl Qcow2DevParams {
             backing: None,
             repair: false,
             data_file: None,
+            encryption_secret: None,
+            image_secrets: Default::default(),
         }
     }
 
+    /// Set the default passphrase. Debug output is redacted and copies are zeroized on drop.
+    pub fn set_encryption_secret(&mut self, bytes: impl AsRef<[u8]>) {
+        self.encryption_secret = Some(super::crypto::Secret::new(bytes.as_ref()));
+    }
+    /// Override the default passphrase for a particular image in a backing chain.
+    pub fn set_image_encryption_secret(
+        &mut self,
+        path: std::path::PathBuf,
+        bytes: impl AsRef<[u8]>,
+    ) -> Qcow2Result<()> {
+        self.image_secrets.insert(
+            std::fs::canonicalize(path)?,
+            super::crypto::Secret::new(bytes.as_ref()),
+        );
+        Ok(())
+    }
     pub fn get_bs_bits(&self) -> u8 {
         self.bs_shift
     }

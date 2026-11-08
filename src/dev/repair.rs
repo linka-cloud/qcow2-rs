@@ -27,6 +27,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.new_cluster.write().await.clear();
         let h = self.header.read().await;
         self.info.set_virtual_size(h.size());
+        self.info.set_encrypted(h.crypt_method() != 0);
         let l1_size = (h.l1_table_entries() * 8)
             .align_up(self.info.cluster_size())
             .unwrap()

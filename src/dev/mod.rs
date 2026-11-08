@@ -14,6 +14,7 @@ mod alloc;
 mod cache;
 mod check;
 mod compression;
+mod crypto;
 mod discard;
 mod graph;
 mod info;
@@ -22,6 +23,7 @@ mod repair;
 mod snapshots;
 mod write;
 use self::alloc::HostCluster;
+pub use self::crypto::LuksOptions;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
 pub use self::info::{Qcow2DevParams, Qcow2Info};
 pub use self::snapshots::SnapshotOptions;
@@ -67,6 +69,8 @@ pub struct Qcow2Dev<T> {
     // of a freed extent before its hole-punch completes.
     io_lock: AsyncRwLock<()>,
 
+    crypto: AsyncRwLock<Option<crypto::PayloadCipher>>,
+    secret: AsyncMutex<Option<crypto::Secret>>,
     file: T,
     data_file: Option<T>,
     data_file_name: Option<String>,
@@ -99,12 +103,19 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         if needs_repair && !params.is_read_only() && !params.is_repair_mode() {
             return Err("Dirty/corrupt image requires explicit repair mode".into());
         }
-        if h.crypt_method() != 0 {
-            return Err(format!(
-                "qcow2 encryption method {} is not supported",
-                h.crypt_method()
-            )
-            .into());
+        if h.crypt_method() > 2 {
+            return Err("Unsupported qcow2 encryption method".into());
+        }
+        let secret = std::fs::canonicalize(path)
+            .ok()
+            .and_then(|p| params.image_secrets.get(&p))
+            .or(params.encryption_secret.as_ref())
+            .cloned();
+        if h.crypt_method() != 0 && secret.is_none() {
+            return Err("Missing encryption secret".into());
+        }
+        if h.crypt_method() != 0 && h.autoclear_features() & 2 != 0 {
+            return Err("Encryption is incompatible with raw external data consistency".into());
         }
         let bs_shift = params.get_bs_bits();
 
@@ -135,6 +146,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             path: path.to_path_buf(),
             header: AsyncRwLock::new(header),
             file,
+            crypto: AsyncRwLock::new(None),
+            secret: AsyncMutex::new(secret),
             data_file: None,
             data_file_name,
             backing_file: None,

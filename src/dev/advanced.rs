@@ -19,6 +19,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         guest: u64,
     ) -> Qcow2Result<L2Entry> {
         let entry = L2Entry::try_from_plain(value, &self.info)?;
+        if self.info.encrypted() && entry.is_compressed() {
+            return Err(invalid(
+                "Encrypted images cannot contain compressed clusters",
+            ));
+        }
         if self.info.extended_l2() {
             if entry.is_compressed() {
                 if bitmap != 0 {
@@ -167,25 +172,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 MappingSource::DataFile => {
                     let host =
                         mapping.cluster_offset.unwrap() + self.info.in_cluster_offset(off) as u64;
-                    if self.info.external_data() {
-                        let base = host & !(bs as u64 - 1);
-                        let pad = (host - base) as usize;
-                        let mut aligned = Qcow2IoBuf::<u8>::new((pad + n).div_ceil(bs) * bs);
-                        let count = self
-                            .data_file
-                            .as_ref()
-                            .ok_or_else(|| invalid("Missing external data file"))?
-                            .read_to(base, &mut aligned)
-                            .await?;
-                        if count < pad + n {
-                            return Err(invalid("Short external data read"));
-                        }
-                        tmp.copy_from_slice(&aligned[pad..pad + n]);
-                        n
-                    } else {
-                        tmp.copy_from_slice(&self.read_bytes(host, n).await?);
-                        n
-                    }
+                    tmp.copy_from_slice(&self.read_payload(host, off, n).await?);
+                    n
                 }
                 MappingSource::Compressed => {
                     self.do_read_compressed(mapping, self.info.in_cluster_offset(off), &mut tmp)
@@ -345,6 +333,14 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     let host = if compressed.is_some() {
                         0
                     } else if self.info.external_data() {
+                        if self.info.encrypted() {
+                            self.crypto
+                                .read()
+                                .await
+                                .as_ref()
+                                .ok_or("Encryption is not initialized")?
+                                .apply(guest, guest, &mut data, true)?;
+                        }
                         self.data_file
                             .as_ref()
                             .ok_or_else(|| invalid("Missing external data file"))?
@@ -355,7 +351,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                             .await?;
                         guest
                     } else {
-                        self.allocate_object(&data).await?
+                        self.allocate_payload(&data, guest).await?
                     };
                     descriptor = compressed.unwrap_or((1 << 63) | host);
                     if self.info.extended_l2() {

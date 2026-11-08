@@ -477,6 +477,9 @@ impl Qcow2Header {
             backing_filename,
             extensions,
         };
+        if (header.crypt_method() == 2) != header.extension_data(0x0537be77).is_some() {
+            return Err("qcow2 encryption header pointer must be present only for LUKS".into());
+        }
         if header.raw.autoclear_features & 1 != 0
             && !header.extensions.iter().any(|extension| {
                 matches!(
@@ -691,6 +694,18 @@ impl Qcow2Header {
         self.raw.version
     }
 
+    pub(crate) fn set_crypt_method(&mut self, method: u32) {
+        self.raw.crypt_method = method;
+    }
+    pub(crate) fn set_extension(&mut self, kind: u32, data: Option<Vec<u8>>) {
+        self.extensions.retain(|e| e.extension_type() != kind);
+        if let Some(data) = data {
+            self.extensions.push(Qcow2HeaderExtension::Unknown {
+                extension_type: kind,
+                data,
+            });
+        }
+    }
     pub fn crypt_method(&self) -> u32 {
         self.raw.crypt_method
     }
