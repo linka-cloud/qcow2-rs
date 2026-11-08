@@ -23,6 +23,43 @@ pub struct CheckArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct SnapshotArgs {
+    /// QCOW2 image path
+    file: PathBuf,
+    #[command(subcommand)]
+    action: SnapshotAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SnapshotAction {
+    /// List internal snapshots
+    List,
+    /// Save the active disk and optional VM-state payload
+    Create {
+        id: String,
+        #[arg(long, default_value = "")]
+        name: String,
+        #[arg(long)]
+        vm_state: Option<PathBuf>,
+    },
+    /// Delete an internal snapshot
+    Delete { id: String },
+    /// Restore the disk contents and virtual size of a snapshot
+    Restore { id: String },
+    /// Export saved VM-state bytes to a new file
+    VmState { id: String, output: PathBuf },
+}
+
+#[derive(Args, Debug)]
+pub struct ZeroArgs {
+    file: PathBuf,
+    #[arg(value_parser=maybe_hex::<u64>)]
+    offset: u64,
+    #[arg(value_parser=maybe_hex::<usize>)]
+    length: usize,
+}
+
+#[derive(Args, Debug)]
 pub struct InfoArgs {
     /// qcow2 image path
     file: PathBuf,
@@ -127,6 +164,12 @@ pub enum Commands {
 
     /// Check meta data integrity or cluster leak
     Check(CheckArgs),
+
+    /// Manage internal snapshots and saved VM-state payloads
+    Snapshot(SnapshotArgs),
+
+    /// Write zeros to an aligned guest range
+    Zero(ZeroArgs),
 
     /// Map qcow2 virtual address into host cluster offset (for development only, may be removed in future)
     Map(MapArgs),
@@ -721,6 +764,67 @@ fn convert_qcow2(args: ConvertArgs) -> Qcow2Result<()> {
     __convert_qcow2(args)
 }
 
+fn snapshot_qcow2(args: SnapshotArgs) -> Qcow2Result<()> {
+    Runtime::new()?.block_on(async {
+        let read_only = matches!(
+            args.action,
+            SnapshotAction::List | SnapshotAction::VmState { .. }
+        );
+        let params = qcow2_rs::qcow2_default_params!(read_only, false);
+        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        match args.action {
+            SnapshotAction::List => {
+                println!("ID\tNAME\tDISK BYTES\tVM STATE BYTES");
+                for s in dev.list_snapshots().await? {
+                    println!("{}\t{}\t{}\t{}", s.id, s.name, s.disk_size, s.vm_state_size);
+                }
+            }
+            SnapshotAction::Create { id, name, vm_state } => {
+                let state = vm_state.map(std::fs::read).transpose()?.unwrap_or_default();
+                dev.create_snapshot(
+                    qcow2_rs::dev::SnapshotOptions {
+                        id,
+                        name,
+                        ..Default::default()
+                    },
+                    &state,
+                )
+                .await?;
+            }
+            SnapshotAction::Delete { id } => dev.delete_snapshot(&id).await?,
+            SnapshotAction::Restore { id } => dev.restore_snapshot(&id).await?,
+            SnapshotAction::VmState { id, output } => {
+                // Validate the snapshot before creating the output file.
+                dev.read_snapshot_vm_state(&id, 0, &mut []).await?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(output)?;
+                let mut buf = vec![0; 1 << 20];
+                let mut offset = 0;
+                loop {
+                    let n = dev.read_snapshot_vm_state(&id, offset, &mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    file.write_all(&buf[..n])?;
+                    offset += n as u64;
+                }
+                file.sync_all()?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn zero_qcow2(args: ZeroArgs) -> Qcow2Result<()> {
+    Runtime::new()?.block_on(async {
+        let params = qcow2_rs::qcow2_default_params!(false, false);
+        let dev = qcow2_setup_dev_tokio(&args.file, &params).await?;
+        dev.write_zeroes(args.offset, args.length).await
+    })
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -735,6 +839,8 @@ fn main() {
         Commands::Map(arg) => map_qcow2(arg).unwrap(),
         Commands::Info(arg) => info_qcow2(arg).unwrap(),
         Commands::Check(arg) => check_qcow2(arg).unwrap(),
+        Commands::Snapshot(arg) => snapshot_qcow2(arg).unwrap(),
+        Commands::Zero(arg) => zero_qcow2(arg).unwrap(),
         Commands::Convert(arg) => convert_qcow2(arg).unwrap(),
     };
 }
