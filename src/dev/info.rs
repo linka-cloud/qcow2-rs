@@ -44,8 +44,8 @@ impl Qcow2Info {
 
         let ro = p.is_read_only();
 
-        if p.is_backing_dev() {
-            assert!(ro);
+        if p.is_backing_dev() && !ro {
+            return Err("Backing devices must be read-only".into());
         }
 
         let cluster_shift: u8 = h.cluster_bits().try_into().unwrap();

@@ -89,10 +89,20 @@ async fn invalid_block_and_cache_geometry_returns_errors() {
         Qcow2DevParams::new(13, None, None, false, false),
         Qcow2DevParams::new(u8::MAX, None, None, false, false),
     ];
-    for cache in [(8, 4096), (17, 1 << 20), (u8::MAX, usize::MAX), (12, 4096)] {
+    for cache in [
+        (8, 4096),
+        (17, 1 << 20),
+        (u8::MAX, usize::MAX),
+        (12, 4096),
+        (12, usize::MAX),
+    ] {
         invalid.push(Qcow2DevParams::new(9, Some(cache), None, false, false));
         invalid.push(Qcow2DevParams::new(9, None, Some(cache), false, false));
     }
+    let mut writable_backing = Qcow2DevParams::new(9, None, None, true, false);
+    writable_backing.mark_backing_dev(Some(true));
+    writable_backing.set_read_only(false);
+    invalid.push(writable_backing);
     for params in invalid {
         assert!(qcow2_setup_dev_tokio(image.path(), &params).await.is_err());
     }
