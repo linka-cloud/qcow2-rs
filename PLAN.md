@@ -72,7 +72,7 @@ Address these before advertising broader feature support:
       discard punches an extent without establishing exclusive ownership.
 - [ ] Review discard ordering, concurrent writes/allocation, and failure handling
       so an extent cannot be reclaimed while still referenced or after reuse.
-- [ ] Parse v2 headers using their 72-byte layout and implied defaults; serialize
+- [x] Parse v2 headers using their 72-byte layout and implied defaults; serialize
       them using the correct layout. The current parser reads a v3 structure
       even for v2 images.
 - [ ] Accept only supported format versions and validate header lengths,

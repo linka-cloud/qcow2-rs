@@ -192,14 +192,18 @@ numerical_enum! {
 
 impl Qcow2RawHeader {
     pub fn serialize_vec(&mut self) -> Qcow2Result<Vec<u8>> {
-        self.header_length = size_of::<Self>().align_up(8usize).unwrap().try_into()?;
+        self.header_length = if self.version == 2 {
+            72
+        } else {
+            size_of::<Self>().align_up(8usize).unwrap().try_into()?
+        };
 
         let bincode = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_big_endian();
 
         let mut header_buf = bincode.serialize(self)?;
-        header_buf.resize(header_buf.len().align_up(8usize).unwrap(), 0);
+        header_buf.resize(self.header_length as usize, 0);
 
         assert!(header_buf.len() == self.header_length as usize);
 
@@ -251,20 +255,37 @@ impl Qcow2Header {
             .with_fixint_encoding()
             .with_big_endian();
 
-        let mut header: Qcow2RawHeader =
-            bincode.deserialize(&header_buf[0..size_of::<Qcow2RawHeader>()])?;
-        if header.magic != Self::QCOW2_MAGIC {
+        let prefix = header_buf.get(..8).ok_or("Truncated qcow2 header")?;
+        let (magic, version): (u32, u32) = bincode.deserialize(prefix)?;
+        if magic != Self::QCOW2_MAGIC {
             return Err("Not a qcow2 file".into());
         }
 
-        if header.version < 2 {
-            let v = header.version;
-            return Err(format!("qcow2 v{v} is not supported").into());
+        if !matches!(version, 2 | 3) {
+            return Err(format!("qcow2 v{version} is not supported").into());
         }
 
-        // refcount_order is always 4 for version 2
-        if header.version == 2 {
+        // Deserialize only fields present in this version. In v2 the bytes
+        // after offset 72 can already contain extensions or a backing name.
+        let required = if version == 2 { 72 } else { 104 };
+        let base = header_buf.get(..required).ok_or("Truncated qcow2 header")?;
+        let mut raw_buf = vec![0; size_of::<Qcow2RawHeader>()];
+        raw_buf[..required].copy_from_slice(base);
+        let mut header: Qcow2RawHeader = bincode.deserialize(&raw_buf)?;
+        if version == 2 {
             header.refcount_order = 4;
+            header.header_length = 72;
+        } else {
+            let length = header.header_length as usize;
+            if length < 104 || length % 8 != 0 || length > header_buf.len() {
+                return Err("Invalid qcow2 header length".into());
+            }
+            if length > 104 {
+                header.compression_type = header_buf[104];
+            }
+            if header.refcount_order > 6 {
+                return Err("Invalid qcow2 refcount order".into());
+            }
         }
 
         let cluster_bits = header.cluster_bits;
@@ -275,6 +296,9 @@ impl Qcow2Header {
         let cluster_size = 1u64 << cluster_bits;
         if cluster_size > Self::MAX_CLUSTER_SIZE as u64 {
             return Err(format!("qcow2 cluster size {cluster_size} is too big").into());
+        }
+        if header.header_length as u64 > cluster_size {
+            return Err("qcow2 header exceeds the first cluster".into());
         }
 
         // the spec requires both tables to start at a cluster boundary,
@@ -325,10 +349,15 @@ impl Qcow2Header {
         };
 
         let mut ext_offset: u64 = header.header_length as u64;
+        let ext_end = if header.backing_file_offset != 0 {
+            header.backing_file_offset.min(cluster_size)
+        } else {
+            cluster_size
+        };
         let mut extensions = Vec::<Qcow2HeaderExtension>::new();
-        loop {
+        while ext_offset < ext_end {
             let max_len = ext_offset + size_of::<Qcow2HeaderExtensionHeader>() as u64;
-            if max_len > cluster_size || max_len > header_buf.len() as u64 {
+            if max_len > ext_end || max_len > header_buf.len() as u64 {
                 return Err(
                     "Header extensions exceed the first cluster or header buffer is too small"
                         .into(),
@@ -342,7 +371,7 @@ impl Qcow2Header {
 
             let ext_hdr: Qcow2HeaderExtensionHeader = bincode.deserialize(ext_hdr_buf)?;
             let max_len = ext_offset + ext_hdr.length as u64;
-            if max_len > cluster_size || max_len > header_buf.len() as u64 {
+            if max_len > ext_end || max_len > header_buf.len() as u64 {
                 return Err("Header extensions exceed the first cluster or buffer length".into());
             }
 
@@ -523,7 +552,11 @@ impl Qcow2Header {
     }
 
     pub fn serialize_to_buf(&mut self) -> Qcow2Result<Vec<u8>> {
-        let header_len = size_of::<Qcow2RawHeader>().align_up(8usize).unwrap();
+        let header_len = if self.raw.version == 2 {
+            72
+        } else {
+            size_of::<Qcow2RawHeader>().align_up(8usize).unwrap()
+        };
         let mut header_exts = self.serialize_extensions()?;
 
         if let Some(backing) = self.backing_filename.as_ref() {
@@ -754,6 +787,58 @@ impl Qcow2HeaderExtension {
 mod tests {
     use super::*;
     use crate::dev::*;
+
+    fn minimal_header(version: u32, length: u32) -> Vec<u8> {
+        let mut buf = vec![0; 512];
+        buf[..4].copy_from_slice(&Qcow2Header::QCOW2_MAGIC.to_be_bytes());
+        buf[4..8].copy_from_slice(&version.to_be_bytes());
+        buf[20..24].copy_from_slice(&9_u32.to_be_bytes());
+        if version == 3 {
+            buf[96..100].copy_from_slice(&4_u32.to_be_bytes());
+            buf[100..104].copy_from_slice(&length.to_be_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn test_version_specific_headers() {
+        for version in [2, 3] {
+            let buf = minimal_header(version, 104);
+            let header = Qcow2Header::from_buf(&buf).unwrap();
+            assert_eq!(header.version(), version);
+            assert_eq!(header.refcount_order(), 4);
+            assert_eq!(header.header_length(), if version == 2 { 72 } else { 104 });
+        }
+
+        // A v2 backing name can immediately follow the 72-byte header.
+        let mut buf = minimal_header(2, 0);
+        buf[8..16].copy_from_slice(&72_u64.to_be_bytes());
+        buf[16..20].copy_from_slice(&8_u32.to_be_bytes());
+        buf[72..80].copy_from_slice(b"base.raw");
+        let mut header = Qcow2Header::from_buf(&buf).unwrap();
+        assert_eq!(header.backing_filename().unwrap(), "base.raw");
+        let serialized = header.serialize_to_buf().unwrap();
+        let header = Qcow2Header::from_buf(&serialized).unwrap();
+        assert_eq!(header.header_length(), 72);
+        assert_eq!(header.backing_filename().unwrap(), "base.raw");
+    }
+
+    #[test]
+    fn test_invalid_header_layouts() {
+        let buf = minimal_header(3, 104);
+        for length in 0..104 {
+            assert!(Qcow2Header::from_buf(&buf[..length]).is_err());
+        }
+        for version in [0, 1, 4, u32::MAX] {
+            assert!(Qcow2Header::from_buf(&minimal_header(version, 104)).is_err());
+        }
+        for length in [0, 72, 103, 105, 520, u32::MAX] {
+            assert!(Qcow2Header::from_buf(&minimal_header(3, length)).is_err());
+        }
+        let mut buf = minimal_header(3, 104);
+        buf[96..100].copy_from_slice(&7_u32.to_be_bytes());
+        assert!(Qcow2Header::from_buf(&buf).is_err());
+    }
 
     #[test]
     fn test_format() {
