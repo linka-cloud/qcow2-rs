@@ -148,6 +148,8 @@ Address these before advertising broader feature support:
       and validate cluster/block-size combinations explicitly.
 - [ ] Complete contiguous allocation handling, including the larger-allocation
       TODO in refcount-table growth and the short-allocation FIXME in L1 growth.
+      L1 clones now size storage in bytes, zero new entries, advertise the
+      requested entry count, and mark every relocated block for writing.
 
 Acceptance: unsupported images fail before mutation; supported images preserve
 unmodified bytes and metadata across writes, discard, flush, and reopen.

@@ -106,17 +106,22 @@ impl L1Table {
 
     /// Create a clone that covers at least `at_least_index`
     pub fn clone_and_grow(&self, at_least_index: usize, cluster_size: usize) -> Self {
-        let new_size = std::cmp::max(at_least_index + 1, self.data.len());
-        let new_size = new_size.align_up(cluster_size).unwrap();
+        let entries = std::cmp::max(at_least_index + 1, self.data.len());
+        let new_size = (entries * std::mem::size_of::<L1Entry>())
+            .align_up(cluster_size)
+            .unwrap();
         let mut new_data = Qcow2IoBuf::<L1Entry>::new(new_size);
+        new_data.zero_buf();
         new_data[..self.data.len()].copy_from_slice(&self.data);
 
         Self {
             offset: None,
             data: new_data,
             bs_bits: self.bs_bits,
-            header_entries: self.data.len() as u32,
-            dirty_blocks: RefCell::new(self.dirty_blocks.borrow().clone()),
+            header_entries: std::cmp::max(self.header_entries, (at_least_index + 1) as u32),
+            // Every block must be written at the new location, including
+            // unchanged entries copied from the old table and zero padding.
+            dirty_blocks: RefCell::new((0..(new_size >> self.bs_bits) as u32).collect()),
         }
     }
 
@@ -172,5 +177,28 @@ mod tests {
         unsafe {
             assert!(u64::from_be(*raw_addr) == l2_offset);
         };
+    }
+
+    #[test]
+    fn test_grown_l1_covers_index_and_initializes_new_entries() {
+        let mut old = L1Table::new(Some(4096), 4096, 512, 9);
+        old.map_l2_offset(0, 8192);
+        let grown = old.clone_and_grow(512, 4096);
+        assert!(grown.entries() > 512);
+        assert!(grown.in_bounds(512));
+        assert!(!grown.in_bounds(513));
+        assert_eq!(grown.byte_size() % 4096, 0);
+        assert_eq!(grown.get(0).l2_offset(), 8192);
+        for index in 512..grown.entries() {
+            assert_eq!(grown.get(index).into_plain(), 0);
+        }
+        // Relocation must write copied entries as well as newly dirty entries.
+        let dirty: Vec<_> = std::iter::from_fn(|| grown.pop_dirty_blk_idx(None)).collect();
+        assert_eq!(
+            dirty,
+            (0..grown.byte_size() as u32 / 512).collect::<Vec<_>>()
+        );
+        assert_eq!(old.entries(), 512);
+        assert_eq!(old.get_offset(), Some(4096));
     }
 }

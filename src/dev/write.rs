@@ -63,8 +63,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                         new_l1_table.set_offset(Some(res.0));
                         self.flush_top_table(&new_l1_table).await?;
 
-                        self.flush_header_for_l1_table(res.0, new_l1_table.entries())
-                            .await?;
+                        self.flush_header_for_l1_table(res.0, l1_index + 1).await?;
                     }
                 };
 
