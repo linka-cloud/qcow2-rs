@@ -242,3 +242,34 @@ async fn private_preallocated_payload_is_reused_but_snapshot_data_is_copied() {
         dev.check().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn ordinary_partial_write_initializes_the_entire_new_payload_cluster() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disk");
+    let options = CreateOptions {
+        size: 1 << 20,
+        ..Default::default()
+    };
+    create_qcow2(&path, &options).await.unwrap();
+    let dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+        .await
+        .unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0xa7);
+    dev.write_at(&buf, 65536).await.unwrap();
+    dev.flush_meta().await.unwrap();
+    drop(dev);
+    let dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+        .await
+        .unwrap();
+    let mut cluster = Qcow2IoBuf::<u8>::new(65536);
+    assert_eq!(
+        dev.read_at(&mut cluster, 65536).await.unwrap(),
+        cluster.len()
+    );
+    assert!(cluster[..512].iter().all(|b| *b == 0xa7));
+    assert!(cluster[512..].iter().all(|b| *b == 0));
+    dev.check().await.unwrap();
+    check(&path);
+}

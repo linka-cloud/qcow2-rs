@@ -172,18 +172,16 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
             match cls_map.get(&key) {
                 Some(cluster) => {
-                    let mut lock = cluster.write().await;
+                    let lock = cluster.write().await;
 
-                    // don't handle discard any more if someone else has done
-                    // that, otherwise mark this cluster is being handled.
+                    // Initialize once while holding the cluster lock. Leave
+                    // the marker clear on failure so a retry initializes it.
                     //
                     // use this per-cluster lock for covering backign COW too,
                     // the whole cluster is copied to top image with this write
                     // lock covered, so any concurrent write has to be started
                     // after the copy is done
                     if !(*lock) {
-                        *lock = true;
-
                         discard = Some(self.call_fallocate(host_off, info.cluster_size(), 0));
                         Some(lock)
                     } else {
@@ -194,10 +192,19 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
         };
 
-        if let Some(lock) = cluster_lock {
+        if let Some(mut lock) = cluster_lock {
             if let Some(df) = discard {
-                df.await?
+                df.await?;
             }
+            // Hole punching keeps the old host length. Initialize the final
+            // block too so a partial write cannot leave an allocated cluster
+            // whose remaining guest bytes read as host EOF.
+            let tail = crate::ops::zeroed_io_buf(1 << info.block_size_shift);
+            self.call_write(
+                host_off + info.cluster_size() as u64 - tail.len() as u64,
+                &tail,
+            )
+            .await?;
 
             let cow_res = match cow_mapping {
                 None => Ok(()),
@@ -212,17 +219,19 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 },
             };
 
+            cow_res?;
+            *lock = true;
             /*
              * Another write on this new cluster may hold the read lock
              * and we won't move on, so drop write lock first given
-             * we have marked that this new cluster is being discarded.
+             * initialization has completed under this lock.
              */
             drop(lock);
             self.clear_new_cluster(key).await;
             if may_cow {
                 // make sure data flushed before updating mapping
                 self.call_fsync(host_off, info.cluster_size(), 0).await?;
-                return cow_res;
+                return Ok(());
             }
         };
 
