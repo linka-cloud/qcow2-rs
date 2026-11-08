@@ -167,8 +167,10 @@ unmodified bytes and metadata across writes, discard, flush, and reopen.
       image, including partial-cluster reads and writes at its boundary.
 - [ ] Build a metadata traversal that calculates exact expected refcounts,
       rather than only testing allocation/non-allocation and leaks.
-- [ ] Report invalid mappings as structured checker failures. Some current
-      mapping errors only print diagnostics and do not fail `check()`.
+- [x] Report invalid mappings as checker failures. Missing data refcounts now
+      return `InvalidData` errors with guest/host offsets instead of only printing
+      diagnostics. Allocated zero clusters and all compressed host clusters are
+      included in validation and usage accounting.
 - [ ] Cover compressed extents, allocated zero clusters, metadata overlaps,
       and all referenced metadata; extend traversal as later features land.
 - [ ] Add explicit repair operations for reconstructing refcounts and resolving

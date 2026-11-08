@@ -1,7 +1,7 @@
 use super::*;
 use crate::error::Qcow2Result;
 use crate::helpers::IntAlignment;
-use crate::meta::{Mapping, MappingSource, Table, TableEntry};
+use crate::meta::{Table, TableEntry};
 use futures_locks::RwLock as AsyncRwLock;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -111,27 +111,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let mut compressed = 0;
 
         for start in (0..end).step_by(info.cluster_size()) {
-            let mapping = self.get_mapping(start).await?;
-
-            match mapping.source {
-                MappingSource::Zero | MappingSource::Unallocated | MappingSource::Backing => {}
-                MappingSource::DataFile => {
-                    if let Some(off) = mapping.cluster_offset {
-                        allocated += 1;
-                        Self::add_used_cluster_to_set(ranges, off >> self.info.cluster_bits());
-                    }
-                }
-                MappingSource::Compressed => {
-                    if let Some(off) = mapping.cluster_offset {
-                        let start = off >> info.cluster_bits();
-                        let end = (off + (mapping.compressed_length.unwrap() as u64))
-                            >> info.cluster_bits();
-                        for off in start..=end {
-                            Self::add_used_cluster_to_set(ranges, off);
-                        }
-                        allocated += 1;
-                        compressed += 1;
-                    }
+            let entry = self.get_l2_entry(start).await?;
+            if let Some((offset, count)) = entry.allocation(info.cluster_bits() as u32) {
+                allocated += 1;
+                compressed += usize::from(entry.is_compressed());
+                let first = offset >> info.cluster_bits();
+                for cluster in first..first + count as u64 {
+                    Self::add_used_cluster_to_set(ranges, cluster);
                 }
             }
         }
@@ -252,29 +238,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(self.cluster_refcount(host_cluster).await? != 0)
     }
 
-    async fn check_cluster(&self, virt_off: u64, cluster: Option<u64>) -> Qcow2Result<()> {
-        match cluster {
-            None => Ok(()),
-            Some(host_cluster) => {
-                if !self.cluster_is_allocated(host_cluster).await? {
-                    eprintln!(
-                        "virt_offset {virt_off:x} pointed to non-allocated cluster {host_cluster:x}"
-                    );
-                }
-                Ok(())
-            }
+    async fn check_cluster(&self, virt_off: u64, host_cluster: u64) -> Qcow2Result<()> {
+        if !self.cluster_is_allocated(host_cluster).await? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "virt_offset {virt_off:x} points to non-allocated cluster {host_cluster:x}"
+                ),
+            )
+            .into());
         }
-    }
-
-    /// no need to check backing & compressed, which is readonly
-    async fn check_single_mapping(&self, off: u64, mapping: Mapping) -> Qcow2Result<()> {
-        match mapping.source {
-            MappingSource::Zero
-            | MappingSource::Unallocated
-            | MappingSource::Backing
-            | MappingSource::Compressed => Ok(()),
-            MappingSource::DataFile => self.check_cluster(off, mapping.cluster_offset).await,
-        }
+        Ok(())
     }
 
     /// check if every cluster pointed by mapping is valid
@@ -283,9 +257,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let end = info.virtual_size();
 
         for start in (0..end).step_by(info.cluster_size()) {
-            let mapping = self.get_mapping(start).await?;
-
-            self.check_single_mapping(start, mapping).await?;
+            let entry = self.get_l2_entry(start).await?;
+            if let Some((offset, count)) = entry.allocation(info.cluster_bits() as u32) {
+                for cluster in 0..count {
+                    self.check_cluster(start, offset + ((cluster as u64) << info.cluster_bits()))
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
