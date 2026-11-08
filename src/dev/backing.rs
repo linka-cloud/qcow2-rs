@@ -175,7 +175,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         result
     }
-    async fn storage_paths(&self) -> Qcow2Result<Vec<PathBuf>> {
+    /// Metadata, external payload, and backing paths used by this device.
+    pub async fn storage_paths(&self) -> Qcow2Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         let mut current = self;
         loop {

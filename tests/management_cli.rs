@@ -371,3 +371,58 @@ fn external_creation_and_renamed_payload_amendment() {
     management_run(&["format", &empty, "--size", "0", "--cluster-bits", "9"]);
     management_run(&["info", &empty]);
 }
+
+#[test]
+fn conversion_pads_partial_sectors_and_rejects_storage_aliases() {
+    let d = tempfile::tempdir().unwrap();
+    let path = |name| d.path().join(name).to_str().unwrap().to_string();
+    let raw = path("raw");
+    let image = path("image");
+    let output = path("out");
+    let bytes: Vec<u8> = (0..65537).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&raw, &bytes).unwrap();
+    management_run(&["convert", "-f", "raw", "-O", "qcow2", "-o", &image, &raw]);
+    management_run(&["convert", "-f", "qcow2", "-O", "raw", "-o", &output, &image]);
+    let out = std::fs::read(&output).unwrap();
+    assert_eq!(&out[..bytes.len()], bytes.as_slice());
+    assert!(out[bytes.len()..].iter().all(|b| *b == 0));
+    let alias = path("alias");
+    std::fs::hard_link(&raw, &alias).unwrap();
+    let failed = Command::new(env!("CARGO_BIN_EXE_rqcow2"))
+        .args(["convert", "-f", "raw", "-O", "qcow2", "-o", &alias, &raw])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(std::fs::read(&raw).unwrap(), bytes);
+    let overlay = path("overlay");
+    management_run(&[
+        "format",
+        &overlay,
+        "--size",
+        "1",
+        "--backing",
+        "raw",
+        "--backing-format",
+        "raw",
+    ]);
+    let failed = Command::new(env!("CARGO_BIN_EXE_rqcow2"))
+        .args(["convert", "-f", "qcow2", "-O", "raw", "-o", &raw, &overlay])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert_eq!(std::fs::read(&raw).unwrap(), bytes);
+    // Export a valid image whose virtual EOF is inside a sector.
+    let odd = path("odd");
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(qcow2_rs::dev::create_qcow2(
+            std::path::Path::new(&odd),
+            &qcow2_rs::dev::CreateOptions {
+                size: 65537,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    management_run(&["convert", "-f", "qcow2", "-O", "raw", "-o", &output, &odd]);
+    assert_eq!(std::fs::read(&output).unwrap(), vec![0; 65537]);
+}

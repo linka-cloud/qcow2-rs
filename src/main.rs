@@ -683,11 +683,14 @@ async fn copy_from_qcow2<T: Qcow2IoOps>(
     off: u64,
     bytes: usize,
 ) -> Qcow2Result<usize> {
-    let mut buf = Qcow2IoBuf::<u8>::new(bytes);
-    let res = dev.read_at(&mut buf, off).await?;
+    let mut buf = Qcow2IoBuf::<u8>::new(bytes.div_ceil(512) * 512);
+    let res = dev.read_at(&mut buf, off).await?.min(bytes);
+    if res == 0 {
+        return Err("Unexpected EOF during conversion".into());
+    }
 
     dest.seek(SeekFrom::Start(off))?;
-    let res = dest.write(&buf[0..res])?;
+    dest.write_all(&buf[..res])?;
 
     Ok(res)
 }
@@ -698,30 +701,35 @@ async fn copy_to_qcow2<T: Qcow2IoOps>(
     off: u64,
     bytes: usize,
 ) -> Qcow2Result<usize> {
-    let mut buf = Qcow2IoBuf::<u8>::new(bytes);
-
+    let mut buf = Qcow2IoBuf::<u8>::new(bytes.div_ceil(512) * 512);
+    buf.fill(0);
     src.seek(SeekFrom::Start(off))?;
-    let res = src.read(&mut buf)?;
-
-    dev.write_at(&buf[0..res], off).await?;
-    Ok(res)
+    src.read_exact(&mut buf[..bytes])?;
+    dev.write_at(&buf, off).await?;
+    Ok(bytes)
 }
 
 async fn convert_from_qcow2_dev<T: Qcow2IoOps>(dev: &Qcow2Dev<T>, raw: &Path) -> Qcow2Result<()> {
-    let mut file = std::fs::File::create(raw).unwrap();
+    if raw.exists() {
+        for source in dev.storage_paths().await? {
+            if same_file::is_same_file(raw, source)? {
+                return Err("Conversion output aliases image storage".into());
+            }
+        }
+    }
+    let mut file = std::fs::File::create(raw)?;
     let mut off: u64 = 0;
     let buf_size = 8 << 20;
     let total = dev.info.virtual_size();
     while off < total {
         let len = std::cmp::min(buf_size, total - off);
 
-        let res = copy_from_qcow2(dev, &mut file, off, len as usize)
-            .await
-            .unwrap();
+        let res = copy_from_qcow2(dev, &mut file, off, len as usize).await?;
 
         off += res as u64;
     }
 
+    file.sync_all()?;
     Ok(())
 }
 
@@ -734,9 +742,7 @@ async fn convert_to_qcow2_dev<T: Qcow2IoOps>(raw: &Path, dev: &Qcow2Dev<T>) -> Q
     let total = file_orig_size;
     while off < total {
         let len = std::cmp::min(buf_size, total - off);
-        let res = copy_to_qcow2(dev, &mut file, off, len as usize)
-            .await
-            .unwrap();
+        let res = copy_to_qcow2(dev, &mut file, off, len as usize).await?;
         off += res as u64;
     }
     dev.flush_meta().await?;
@@ -754,11 +760,11 @@ fn convert_to_qcow2_prep(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(qcow2)
         .unwrap();
-    let res = f.write(&img_buf).unwrap();
-
-    assert!(res == img_buf.len());
+    f.write_all(&img_buf)?;
+    f.sync_all()?;
 
     Ok(())
 }
@@ -769,25 +775,18 @@ fn convert_from_qcow2(qcow2: &Path, raw: &Path, context: &OpenContext) -> Qcow2R
 
     rt.block_on(async {
         let p = image_params(true, false, context);
-        let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p)
-            .await
-            .unwrap();
-        convert_from_qcow2_dev(&dev, raw).await.unwrap();
-    });
-    Ok(())
+        let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p).await?;
+        convert_from_qcow2_dev(&dev, raw).await
+    })
 }
 
 #[cfg(target_os = "linux")]
 fn convert_from_qcow2(qcow2: &Path, raw: &Path, context: &OpenContext) -> Qcow2Result<()> {
     tokio_uring::start(async {
         let p = image_params(true, true, context);
-        let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p)
-            .await
-            .unwrap();
-
-        convert_from_qcow2_dev(&dev, raw).await.unwrap();
-    });
-    Ok(())
+        let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p).await?;
+        convert_from_qcow2_dev(&dev, raw).await
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -797,12 +796,9 @@ fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
 
     rt.block_on(async {
         let p = image_params(false, false, &OpenContext::default());
-        let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p)
-            .await
-            .unwrap();
-        convert_to_qcow2_dev(raw, &dev).await.unwrap();
-    });
-    Ok(())
+        let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p).await?;
+        convert_to_qcow2_dev(raw, &dev).await
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -811,20 +807,18 @@ fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
 
     tokio_uring::start(async {
         let p = image_params(false, true, &OpenContext::default());
-        let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p)
-            .await
-            .unwrap();
-
-        convert_to_qcow2_dev(raw, &dev).await.unwrap();
-    });
-    Ok(())
+        let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p).await?;
+        convert_to_qcow2_dev(raw, &dev).await
+    })
 }
 
 fn __convert_qcow2(args: ConvertArgs, context: &OpenContext) -> Qcow2Result<()> {
     let in_fmt = &args.fmt;
     let out_fmt = &args.output_fmt;
 
-    if args.file == args.output_file {
+    if args.file == args.output_file
+        || args.output_file.exists() && same_file::is_same_file(&args.file, &args.output_file)?
+    {
         return Err("input and output point to same file".into());
     }
 
