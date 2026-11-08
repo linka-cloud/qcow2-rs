@@ -481,7 +481,7 @@ impl Qcow2Header {
             return Err("qcow2 raw data flag requires an external data file".into());
         }
 
-        if header.raw.incompatible_features != 0 {
+        if header.raw.incompatible_features & !3 != 0 {
             let feats = (0..64)
                 .filter(|bit| header.raw.incompatible_features & (1u64 << bit) != 0)
                 .map(|bit| {

@@ -261,6 +261,7 @@ pub struct Qcow2DevParams {
     direct_io: bool,
     read_only: bool,
     backing: Option<bool>,
+    repair: bool,
 }
 
 impl Qcow2DevParams {
@@ -278,11 +279,19 @@ impl Qcow2DevParams {
             read_only: ro,
             direct_io: dio,
             backing: None,
+            repair: false,
         }
     }
 
     pub fn get_bs_bits(&self) -> u8 {
         self.bs_shift
+    }
+    /// Permit opening a dirty/corrupt image for explicit check/repair only.
+    pub fn set_repair_mode(&mut self, enabled: bool) {
+        self.repair = enabled;
+    }
+    pub fn is_repair_mode(&self) -> bool {
+        self.repair
     }
 
     pub fn set_read_only(&mut self, ro: bool) {

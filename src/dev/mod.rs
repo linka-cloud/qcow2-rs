@@ -16,6 +16,7 @@ mod discard;
 mod graph;
 mod info;
 mod read;
+mod repair;
 mod write;
 use self::alloc::HostCluster;
 pub use self::graph::{CheckReport, RefcountMismatch, Snapshot};
@@ -54,6 +55,7 @@ pub struct Qcow2Dev<T> {
 
     // set in case that any dirty meta is made
     need_flush: AtomicBool,
+    needs_repair: AtomicBool,
     flush_lock: AsyncMutex<()>,
 
     // Ordinary reads/writes share this lock. Discard takes it exclusively
@@ -87,6 +89,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         file: T,
     ) -> Qcow2Result<Self> {
         let h = &header;
+        let needs_repair = h.incompatible_features() & 3 != 0;
+        if needs_repair && !params.is_read_only() && !params.is_repair_mode() {
+            return Err("Dirty/corrupt image requires explicit repair mode".into());
+        }
         if h.crypt_method() != 0 {
             return Err(format!(
                 "qcow2 encryption method {} is not supported",
@@ -131,6 +137,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             refblock_cache: AsyncLruCache::new(rb_cache_cnt),
             new_cluster: AsyncRwLock::new(Default::default()),
             need_flush: AtomicBool::new(false),
+            needs_repair: AtomicBool::new(needs_repair),
             flush_lock: AsyncMutex::new(()),
             io_lock: AsyncRwLock::new(()),
         };
@@ -172,6 +179,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     #[inline(always)]
     fn mark_need_flush(&self, val: bool) {
         self.need_flush.store(val, Ordering::Relaxed);
+    }
+    pub(crate) fn ensure_usable(&self) -> Qcow2Result<()> {
+        if self.needs_repair.load(Ordering::Acquire) {
+            return Err("Image requires refcount repair before guest I/O".into());
+        }
+        Ok(())
     }
 
     /// Helper for checking if there is dirty meta data which needs

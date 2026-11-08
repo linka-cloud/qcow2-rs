@@ -13,14 +13,18 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Keep the in-memory flags until fsync succeeds so a failed attempt can
     /// be retried without allowing guest I/O through the barrier.
     pub(crate) async fn prepare_writable(&self) -> Qcow2Result<()> {
+        self.ensure_usable()?;
         if self.info.is_read_only() {
             return Err("Attempt to modify a read-only qcow2 image".into());
         }
-        if self.header.read().await.autoclear_features() == 0 {
+        let h = self.header.read().await;
+        let lazy = h.compatible_features() & 1 != 0;
+        if h.autoclear_features() == 0 && (!lazy || h.incompatible_features() & 1 != 0) {
             return Ok(());
         }
+        drop(h);
         let mut header = self.header.write().await;
-        if header.autoclear_features() == 0 {
+        if header.autoclear_features() == 0 && (!lazy || header.incompatible_features() & 1 != 0) {
             return Ok(());
         }
 
@@ -31,9 +35,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             return Err("Short read while clearing qcow2 autoclear features".into());
         }
         buf[88..96].fill(0);
+        let flags = header.incompatible_features() | u64::from(lazy);
+        buf[72..80].copy_from_slice(&flags.to_be_bytes());
         self.call_write(0, &buf).await?;
         self.call_fsync(0, buf.len(), 0).await?;
         header.clear_autoclear_features();
+        header.set_incompatible_features(flags);
         Ok(())
     }
 
@@ -545,6 +552,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// flush meta data in ram to disk
     pub async fn flush_meta(&self) -> Qcow2Result<()> {
+        let _io = self.io_lock.read().await;
+        self.flush_meta_locked().await
+    }
+
+    pub(crate) async fn flush_meta_locked(&self) -> Qcow2Result<()> {
         let _flush_lock = self.flush_lock.lock().await;
 
         log::debug!("flush_meta: entry");
@@ -568,6 +580,12 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
         }
         log::debug!("flush_meta: exit");
+        if !self.needs_repair.load(Ordering::Acquire) {
+            let flags = self.header.read().await.incompatible_features();
+            if flags & 1 != 0 {
+                self.store_feature_flags(flags & !1).await?;
+            }
+        }
         Ok(())
     }
 }

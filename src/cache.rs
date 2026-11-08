@@ -136,6 +136,17 @@ impl<K: Clone + PartialEq + Eq + Hash + std::fmt::Debug + std::cmp::PartialOrd, 
         }
     }
 
+    /// Discard stale entries after an exclusive metadata replacement/recovery.
+    pub(crate) fn invalidate(&self) {
+        let mut w = self.wmap.lock().unwrap();
+        let mut r = self.rmap.write().unwrap();
+        for entry in w.values().chain(r.values()) {
+            entry.set_dirty(false);
+        }
+        w.clear();
+        r.clear();
+    }
+
     pub(crate) fn get_dirty_entries(&self, start: K, end: K) -> Vec<(K, AsyncLruCacheEntry<V>)> {
         let map = self.rmap.read().unwrap();
         let mut vec = Vec::new();

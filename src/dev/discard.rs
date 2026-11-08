@@ -125,7 +125,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         // A crash after freeing/punching must not leave an old mapping on
         // disk pointing at reclaimed data. io_lock excludes ordinary I/O
         // until the durable mapping removal and reclamation are complete.
-        self.flush_meta().await?;
+        self.flush_meta_locked().await?;
         self.call_fsync(0, 0, 0).await?;
 
         // Refcount-release the host cluster(s). For ordinary (non-

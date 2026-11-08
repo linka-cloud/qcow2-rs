@@ -309,12 +309,14 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     #[async_recursion(?Send)]
     async fn read_at_for_backing(&self, buf: &mut [u8], offset: u64) -> Qcow2Result<usize> {
+        self.ensure_usable()?;
         self.__read_at(buf, offset).await
     }
 
     /// Read data to `buf` from the virtual `offset` of this qcow2 image
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Qcow2Result<usize> {
         let _io = self.io_lock.read().await;
+        self.ensure_usable()?;
         self.__read_at(buf, offset).await
     }
 }

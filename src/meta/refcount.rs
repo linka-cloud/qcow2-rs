@@ -290,6 +290,9 @@ impl RefBlock {
             .ok_or_else(|| format!("Cannot increase refcount beyond {}", u64::MAX))?;
         self.__set(index, val)
     }
+    pub(crate) fn set_count(&mut self, index: usize, value: u64) -> Qcow2Result<()> {
+        self.__set(index, value)
+    }
 
     pub fn decrement(&mut self, index: usize) -> Qcow2Result<()> {
         let val = self

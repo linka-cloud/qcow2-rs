@@ -157,3 +157,47 @@ async fn exact_checker_accounts_for_internal_snapshots() {
     let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
     dev.check().await.unwrap();
 }
+
+#[tokio::test]
+async fn repair_rebuilds_missing_and_wrong_refcounts_without_changing_data() {
+    let (image, original, _, _, ref_offset) = fixture().await;
+    for count in [0_u16, 2, 17] {
+        let mut bytes = original.clone();
+        bytes[ref_offset..ref_offset + 2].copy_from_slice(&count.to_be_bytes());
+        bytes[72..80].copy_from_slice(&3_u64.to_be_bytes());
+        std::fs::write(image.path(), bytes).unwrap();
+        let mut p = Qcow2DevParams::new(9, None, None, false, false);
+        assert!(qcow2_setup_dev_tokio(image.path(), &p).await.is_err());
+        p.set_repair_mode(true);
+        let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        assert!(dev.read_at(&mut buf, 0).await.is_err());
+        dev.repair_refcounts().await.unwrap();
+        dev.check().await.unwrap();
+        dev.read_at(&mut buf, 0).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0x5a));
+        drop(dev);
+        let output = std::process::Command::new("qemu-img")
+            .args(["check", "-q"])
+            .arg(image.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+}
+
+#[tokio::test]
+async fn lazy_refcounts_mark_dirty_until_a_durable_flush() {
+    let (image, mut bytes, _, _, _) = fixture().await;
+    bytes[80..88].copy_from_slice(&1_u64.to_be_bytes());
+    std::fs::write(image.path(), bytes).unwrap();
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0x77);
+    dev.write_at(&buf, 512).await.unwrap();
+    assert_eq!(be64(&std::fs::read(image.path()).unwrap(), 72) & 1, 1);
+    dev.flush_meta().await.unwrap();
+    assert_eq!(be64(&std::fs::read(image.path()).unwrap(), 72) & 1, 0);
+    dev.check().await.unwrap();
+}

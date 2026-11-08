@@ -17,6 +17,9 @@ use tokio::runtime::Runtime;
 pub struct CheckArgs {
     /// qcow2 image path
     file: PathBuf,
+    /// Explicitly rebuild reference counts and clear dirty/corrupt state.
+    #[clap(long)]
+    repair: bool,
 }
 
 #[derive(Args, Debug)]
@@ -542,13 +545,14 @@ fn check_qcow2(args: CheckArgs) -> Qcow2Result<()> {
     let rt = Runtime::new().unwrap();
 
     rt.block_on(async move {
-        let p = qcow2_rs::qcow2_default_params!(false, false);
-        let dev = qcow2_setup_dev_tokio(&args.file, &p).await.unwrap();
-
-        dev.check().await.expect("check failed");
-    });
-
-    Ok(())
+        let mut p = qcow2_rs::qcow2_default_params!(!args.repair, false);
+        p.set_repair_mode(args.repair);
+        let dev = qcow2_setup_dev_tokio(&args.file, &p).await?;
+        if args.repair {
+            dev.repair_refcounts().await?;
+        }
+        dev.check().await
+    })
 }
 
 async fn copy_from_qcow2<T: Qcow2IoOps>(
