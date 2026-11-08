@@ -71,7 +71,32 @@ Persistent bitmap contents are invalidated, not tracked or repaired. The bitmap
 fixture test skips only when the installed QEMU lacks the bitmap subcommand;
 the other autoclear tests still run.
 
-The baseline is complete on-disk format support for QCOW2 versions 2 and 3,
+Third batch:
+
+| Commit | Change |
+| --- | --- |
+| `db4ec64` | Correct L1 growth byte sizing, zero initialization, entry counts, and complete relocation writes |
+| `20ee405` | Require exact contiguous L1 allocations and release/retry short candidates |
+| `bdea63a` | Return missing-refcount errors and account for allocated zero clusters and compressed extents correctly |
+| `8ee0a05` | Relocate refcount tables without recursive locking, zero-length operations, incomplete writes, or unaligned header publication |
+
+Third-batch validation: all 80 tests pass with `cargo test`, including io_uring;
+formatting and Clippy for the library and regression targets pass with warnings.
+New allocation regressions cover a fragmented refblock boundary, unsupported
+exact-allocation sizes, and table relocation under buffered/direct I/O. Relocated
+images pass `qemu-img check`, and reopen checks verify the old table was freed
+and the replacement remains allocated. Checker regressions verify read-only
+error reporting, allocated zero clusters, compressed storage spanning two host
+clusters, and leak detection at an aligned compressed-range endpoint.
+
+Large contiguous allocations spanning refblocks remain unsupported. Refcount
+table growth still has the documented single-refblock allocation limit. The
+checker does not yet reconstruct exact counts or traverse all optional metadata.
+Header publication now flushes dependencies before an aligned header write and
+syncs that write before old storage can be released; partial/failed header I/O
+can still require on-disk recovery.
+
+The target is complete on-disk format support for QCOW2 versions 2 and 3,
 including safe reads, writes, metadata preservation, and recovery where
 applicable. QEMU implementation limits can remain where explicitly validated
 and documented. Unsupported or invalid feature combinations must fail with
