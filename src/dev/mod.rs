@@ -85,7 +85,6 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         let bs_shift = params.get_bs_bits();
 
-        debug_assert!((9..=12).contains(&bs_shift));
         let info = Qcow2Info::new(h, params)?;
 
         let l2_cache_cnt = info.l2_cache_cnt as usize;

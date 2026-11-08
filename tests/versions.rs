@@ -55,3 +55,33 @@ async fn v2_read_write_and_header_roundtrip() {
     let header = Qcow2Header::from_buf(&std::fs::read(image.path()).unwrap()).unwrap();
     assert_eq!(header.version(), 2);
 }
+
+#[tokio::test]
+async fn small_clusters_use_default_caches() {
+    for cluster_bits in 9..=12 {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        let output = Command::new("qemu-img")
+            .args(["create", "-f", "qcow2", "-o"])
+            .arg(format!("cluster_size={}", 1 << cluster_bits))
+            .arg(image.path())
+            .arg("1M")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let params = Qcow2DevParams::new(9, None, None, false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        buf.fill(0x5a);
+        dev.write_at(&buf, 512).await.unwrap();
+        dev.flush_meta().await.unwrap();
+        drop(dev);
+        qemu(&["check", "-q"], image.path());
+
+        let params = Qcow2DevParams::new(9, None, None, true, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        let mut read = Qcow2IoBuf::<u8>::new(1024);
+        dev.read_at(&mut read, 0).await.unwrap();
+        assert!(read[..512].iter().all(|b| *b == 0));
+        assert_eq!(&read[512..], &buf[..]);
+    }
+}

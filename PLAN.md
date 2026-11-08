@@ -81,7 +81,7 @@ Address these before advertising broader feature support:
 - [x] Preserve unknown additional header fields when rewriting the header.
       Unknown extensions are already retained as opaque data; extend this
       preservation to unknown header bytes.
-- [ ] Fix cache geometry for clusters smaller than the default 4 KiB slice,
+- [x] Fix cache geometry for clusters smaller than the default 4 KiB slice,
       and validate cluster/block-size combinations explicitly.
 - [ ] Complete contiguous allocation handling, including the larger-allocation
       TODO in refcount-table growth and the short-allocation FIXME in L1 growth.

@@ -35,6 +35,11 @@ impl Qcow2Info {
     const BACK_FILE: u16 = 1 << 2; // this is one backing image, read only
     pub fn new(h: &Qcow2Header, p: &Qcow2DevParams) -> Qcow2Result<Qcow2Info> {
         let block_size_shift = p.get_bs_bits();
+        if !(9..=12).contains(&block_size_shift) || u32::from(block_size_shift) > h.cluster_bits() {
+            return Err(
+                "Block size must be between 512 and 4096 bytes and fit in a cluster".into(),
+            );
+        }
 
         let ro = p.is_read_only();
 
@@ -54,18 +59,24 @@ impl Qcow2Info {
             default_bytes: usize,
             bs_bits: u8,
             cluster_shift: u8,
-        ) -> (u8, usize) {
+        ) -> Qcow2Result<(u8, usize)> {
             match param {
                 Some((b, s)) => {
-                    debug_assert!(b >= bs_bits && u32::from(b) <= cluster_shift as u32);
-                    assert!((s >> b) >= 2);
-                    (b, s >> b)
+                    if b < bs_bits || b > cluster_shift {
+                        return Err(
+                            "Cache slice size must fit between block and cluster sizes".into()
+                        );
+                    }
+                    if (s >> b) < 2 {
+                        return Err("Cache must hold at least two slices".into());
+                    }
+                    Ok((b, s >> b))
                 }
                 None => {
-                    let bits = 12_u8;
+                    let bits = std::cmp::min(12, cluster_shift);
                     let cnt = std::cmp::max(default_bytes >> bits, 2);
 
-                    (bits, cnt)
+                    Ok((bits, cnt))
                 }
             }
         }
@@ -76,9 +87,9 @@ impl Qcow2Info {
             l2_mapping_bytes,
             block_size_shift,
             cluster_shift,
-        );
+        )?;
         let (rb_slice_bits, rb_cache_cnt) =
-            cache_geometry(p.rb_cache, 256 << 10, block_size_shift, cluster_shift);
+            cache_geometry(p.rb_cache, 256 << 10, block_size_shift, cluster_shift)?;
 
         //todo: support extended l2
         let l2_entries = cluster_size / std::mem::size_of::<u64>();

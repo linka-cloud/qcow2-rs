@@ -65,3 +65,31 @@ async fn internal_snapshots_allow_reads_but_reject_writable_open() {
     }
     assert_eq!(std::fs::read(image.path()).unwrap(), before);
 }
+
+#[tokio::test]
+async fn invalid_block_and_cache_geometry_returns_errors() {
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let before = std::fs::read(image.path()).unwrap();
+    let mut invalid = vec![
+        Qcow2DevParams::new(8, None, None, false, false),
+        Qcow2DevParams::new(13, None, None, false, false),
+        Qcow2DevParams::new(u8::MAX, None, None, false, false),
+    ];
+    for cache in [(8, 4096), (17, 1 << 20), (u8::MAX, usize::MAX), (12, 4096)] {
+        invalid.push(Qcow2DevParams::new(9, Some(cache), None, false, false));
+        invalid.push(Qcow2DevParams::new(9, None, Some(cache), false, false));
+    }
+    for params in invalid {
+        assert!(qcow2_setup_dev_tokio(image.path(), &params).await.is_err());
+    }
+
+    // A valid block size can still be too large for the image's clusters.
+    let mut bytes = before.clone();
+    bytes[20..24].copy_from_slice(&9_u32.to_be_bytes());
+    bytes[40..48].fill(0);
+    bytes[48..56].fill(0);
+    let header = qcow2_rs::meta::Qcow2Header::from_buf(&bytes).unwrap();
+    let params = Qcow2DevParams::new(12, None, None, false, false);
+    assert!(qcow2_rs::dev::Qcow2Info::new(&header, &params).is_err());
+    assert_eq!(std::fs::read(image.path()).unwrap(), before);
+}
