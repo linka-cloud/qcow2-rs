@@ -146,6 +146,13 @@ async fn autoclear_updates_work_with_direct_io() {
 
 #[tokio::test]
 async fn discard_invalidates_persistent_bitmap_metadata() {
+    // The Windows CI fixture tool predates qemu-img's bitmap subcommand.
+    // Other autoclear tests still exercise invalidation on those versions.
+    let help = Command::new("qemu-img").arg("--help").output().unwrap();
+    if !String::from_utf8_lossy(&help.stdout).contains("bitmap") {
+        eprintln!("qemu-img lacks bitmap support; skipping persistent-bitmap fixture");
+        return;
+    }
     let image = make_temp_qcow2_img(1 << 20, 16, 4);
     let params = Qcow2DevParams::new(9, None, None, false, false);
     let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
@@ -153,6 +160,7 @@ async fn discard_invalidates_persistent_bitmap_metadata() {
     buf.fill(0x5a);
     dev.write_at(&buf, 0).await.unwrap();
     dev.flush_meta().await.unwrap();
+    dev.fsync_range(0, 0).await.unwrap();
     drop(dev);
     let output = Command::new("qemu-img")
         .args(["bitmap", "--add"])

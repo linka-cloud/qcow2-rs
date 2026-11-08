@@ -241,17 +241,18 @@ async fn discard_blocks_io_until_durable_removal_and_reclamation_finish() {
     .await
     .unwrap();
 
-    let events = state.events.borrow();
-    let punch = events
-        .iter()
-        .position(|e| matches!(e, Event::Punch(_)))
-        .unwrap();
-    let last_write = events[..punch]
-        .iter()
-        .rposition(|e| matches!(e, Event::Write(_)))
-        .unwrap();
-    assert!(events[last_write + 1..punch].contains(&Event::Sync));
-    drop(events);
+    {
+        let events = state.events.borrow();
+        let punch = events
+            .iter()
+            .position(|e| matches!(e, Event::Punch(_)))
+            .unwrap();
+        let last_write = events[..punch]
+            .iter()
+            .rposition(|e| matches!(e, Event::Write(_)))
+            .unwrap();
+        assert!(events[last_write + 1..punch].contains(&Event::Sync));
+    }
     dev.flush_meta().await.unwrap();
     dev.read_at(&mut read, 0).await.unwrap();
     assert_eq!(&read[..], &written[..]);
