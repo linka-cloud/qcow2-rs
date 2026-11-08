@@ -98,16 +98,20 @@ is blocked until recovery succeeds. Repair reconstructs refcounts and copied
 flags; malformed structures, ambiguous overlaps, and lost payload bytes require
 other recovery tools.
 
+Grouped CLI commands use `rqcow2 <command> <subcommand> <file> [arguments]`.
+The image path comes after the action; earlier `<command> <file> <subcommand>`
+invocations must be reordered.
+
 The CLI exposes these operations:
 
 ```sh
 rqcow2 check disk.qcow2
 rqcow2 check --repair disk.qcow2
-rqcow2 snapshot disk.qcow2 create saved --name baseline --vm-state state.bin
-rqcow2 snapshot disk.qcow2 list
-rqcow2 snapshot disk.qcow2 restore saved
-rqcow2 snapshot disk.qcow2 vm-state saved exported-state.bin
-rqcow2 snapshot disk.qcow2 delete saved
+rqcow2 snapshot create disk.qcow2 saved --name baseline --vm-state state.bin
+rqcow2 snapshot list disk.qcow2
+rqcow2 snapshot restore disk.qcow2 saved
+rqcow2 snapshot vm-state disk.qcow2 saved exported-state.bin
+rqcow2 snapshot delete disk.qcow2 saved
 rqcow2 zero disk.qcow2 0 4096
 ```
 
@@ -180,8 +184,8 @@ rqcow2 rebase overlay.qcow2 --backing replacement.qcow2 --backing-format qcow2
 rqcow2 commit overlay.qcow2
 rqcow2 amend disk.qcow2 --extended-l2 off --refcount-order 5 --compression zstd
 rqcow2 --external-data-file renamed.raw amend external.qcow2 --data-file-name renamed.raw
-rqcow2 --secret-file current.bin keyslot encrypted.qcow2 list
-rqcow2 --secret-file current.bin keyslot encrypted.qcow2 change 0 replacement.bin
+rqcow2 --secret-file current.bin keyslot list encrypted.qcow2
+rqcow2 --secret-file current.bin keyslot change encrypted.qcow2 0 replacement.bin
 ```
 
 CLI `format --size` retains MiB units; `resize` takes bytes and accepts hexadecimal.
@@ -245,12 +249,12 @@ rqcow2 format --compression zstd disk.qcow2
 rqcow2 compress disk.qcow2 cluster-data.raw --offset 0
 rqcow2 --secret-file passphrase.bin format --luks encrypted.qcow2
 rqcow2 --secret-file passphrase.bin check encrypted.qcow2
-rqcow2 bitmap disk.qcow2 create tracking --granularity-bits 16
-rqcow2 bitmap disk.qcow2 list
-rqcow2 bitmap disk.qcow2 export tracking tracking.bits
-rqcow2 bitmap disk.qcow2 clear tracking
-rqcow2 bitmap disk.qcow2 disable tracking
-rqcow2 bitmap disk.qcow2 remove tracking
+rqcow2 bitmap create disk.qcow2 tracking --granularity-bits 16
+rqcow2 bitmap list disk.qcow2
+rqcow2 bitmap export disk.qcow2 tracking tracking.bits
+rqcow2 bitmap clear disk.qcow2 tracking
+rqcow2 bitmap disable disk.qcow2 tracking
+rqcow2 bitmap remove disk.qcow2 tracking
 ```
 
 `--secret-file` is global and applies to check/repair, info/map, snapshots,

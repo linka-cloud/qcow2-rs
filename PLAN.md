@@ -711,3 +711,27 @@ Validation results for this follow-up:
 - The workflow parses as YAML with Linux, Windows, macOS, FreeBSD, and cross-build
   jobs. This session executed Linux tests only; remote platform jobs remain
   unexecuted here. No physical power-loss or torn-sector guarantees are inferred.
+
+## CLI command ordering
+
+Grouped operations now use `rqcow2 <command> <subcommand> <file> [arguments]`:
+
+```sh
+rqcow2 snapshot create disk.qcow2 saved --name baseline
+rqcow2 snapshot list disk.qcow2
+rqcow2 bitmap create disk.qcow2 tracking --granularity-bits 16
+rqcow2 --secret-file current.bin keyslot change encrypted.qcow2 0 replacement.bin
+```
+
+This changes the previous file-before-subcommand CLI syntax for snapshot, bitmap,
+and keyslot groups. Single-level commands keep their existing argument order.
+Help for each group lists its actions without requiring an image path; leaf help
+shows the image before IDs/names or other operands. The README examples use the
+new syntax.
+
+Validation: `cargo test --test management_cli --quiet` passes all **7 tests**,
+including snapshot/VM-state lifecycle, every bitmap action, encrypted keyslot
+lifecycle with distinct backing credentials, help usage, and parse-time rejection
+of the former ordering. `cargo fmt --check`, `git diff --check`, and
+`cargo clippy --bin rqcow2 --test management_cli --no-deps` pass (Clippy emits
+existing warnings). Storage-engine code is unchanged by this CLI-only revision.
