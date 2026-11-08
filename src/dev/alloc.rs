@@ -722,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_contiguous_allocation_spans_refblocks() {
-        for count in [64, 129, 4096] {
+        for count in [64, 129, 4096, 65536] {
             let image = make_temp_qcow2_img(1 << 20, 9, 6);
             let params = qcow2_default_params!(false, false);
             let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();

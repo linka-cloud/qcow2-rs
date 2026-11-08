@@ -102,6 +102,7 @@ async fn empty_and_overflowing_guest_io_do_not_mutate_image() {
     assert_eq!(dev.read_at(&mut [], 0).await.unwrap(), 0);
     dev.write_at(&[], 0).await.unwrap();
     let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0);
     assert!(dev.read_at(&mut buf, u64::MAX - 511).await.is_err());
     assert!(dev.write_at(&buf, u64::MAX - 511).await.is_err());
     assert!(!dev.need_flush_meta());
