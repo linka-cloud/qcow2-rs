@@ -18,7 +18,7 @@ async fn invalid_header_ranges_are_rejected_without_modification() {
         (40, 0_u64.to_be_bytes().to_vec()),
         (48, 0_u64.to_be_bytes().to_vec()),
         (40, original[48..56].to_vec()),
-        (48, (u64::MAX & !65535).to_be_bytes().to_vec()),
+        (48, (!65535_u64).to_be_bytes().to_vec()),
         (24, u64::MAX.to_be_bytes().to_vec()),
         (104, vec![1]),
         (88, 1_u64.to_be_bytes().to_vec()),
@@ -74,8 +74,9 @@ async fn invalid_l2_entries_are_rejected_on_every_attempt() {
     drop(dev);
     let original = std::fs::read(image.path()).unwrap();
     let l2 = be64(&original, be64(&original, 40)) & 0x00ff_ffff_ffff_fe00;
-    for value in [2_u64, (1_u64 << 63), (1_u64 << 56)] {
+    for (value, version) in [(2_u64, 3_u32), (1_u64 << 63, 3), (1_u64 << 56, 3), (1, 2)] {
         let mut bytes = original.clone();
+        bytes[4..8].copy_from_slice(&version.to_be_bytes());
         bytes[l2..l2 + 8].copy_from_slice(&value.to_be_bytes());
         std::fs::write(image.path(), &bytes).unwrap();
         let params = Qcow2DevParams::new(9, None, None, true, false);
@@ -90,4 +91,19 @@ async fn invalid_l2_entries_are_rejected_on_every_attempt() {
     for _ in 0..2 {
         assert!(dev.read_at(&mut buf, 0).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn empty_and_overflowing_guest_io_do_not_mutate_image() {
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let before = std::fs::read(image.path()).unwrap();
+    let params = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+    assert_eq!(dev.read_at(&mut [], 0).await.unwrap(), 0);
+    dev.write_at(&[], 0).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    assert!(dev.read_at(&mut buf, u64::MAX - 511).await.is_err());
+    assert!(dev.write_at(&buf, u64::MAX - 511).await.is_err());
+    assert!(!dev.need_flush_meta());
+    assert_eq!(std::fs::read(image.path()).unwrap(), before);
 }

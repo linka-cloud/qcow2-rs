@@ -587,21 +587,23 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     async fn __write_at(&self, buf: &[u8], mut offset: u64) -> Qcow2Result<()> {
         use futures::stream::{FuturesUnordered, StreamExt};
 
+        if buf.is_empty() {
+            return Ok(());
+        }
+
         let info = &self.info;
         let bs = 1 << info.block_size_shift;
         let bs_mask = bs - 1;
         let mut len = buf.len();
         let old_offset = offset;
-        let single =
-            (offset >> info.cluster_bits()) == ((offset + (len as u64) - 1) >> info.cluster_bits());
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or("Write range overflow")?;
+        let single = (offset >> info.cluster_bits()) == ((end - 1) >> info.cluster_bits());
 
         log::debug!("write_at offset {:x} len {} >>>", offset, buf.len());
 
-        if offset
-            .checked_add(buf.len() as u64)
-            .map(|end| end > info.virtual_size())
-            != Some(false)
-        {
+        if end > info.virtual_size() {
             return Err("Cannot write beyond the end of a qcow2 image".into());
         }
 
