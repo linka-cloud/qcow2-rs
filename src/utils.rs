@@ -198,7 +198,7 @@ macro_rules! qcow2_setup_dev_fn {
                     let file =
                         <$type>::try_new(&path, params.is_read_only(), params.is_direct_io())
                             .await?;
-                    dev.set_data_file(file)?;
+                    dev.set_data_file_with_path(file, path)?;
                 }
                 dev.__qcow2_prep_io().await?;
                 Ok(dev)
@@ -268,7 +268,7 @@ macro_rules! qcow2_setup_dev_fn_sync {
                     }
                     let file =
                         <$type>::try_new(&path, params.is_read_only(), params.is_direct_io())?;
-                    dev.set_data_file(file)?;
+                    dev.set_data_file_with_path(file, path)?;
                 }
                 Ok(dev)
             }

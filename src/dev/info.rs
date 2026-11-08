@@ -1,7 +1,7 @@
 use crate::error::Qcow2Result;
 use crate::helpers::IntAlignment;
 use crate::meta::Qcow2Header;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 /// all readable Qcow2 info, make it into single cache line
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct Qcow2Info {
     pub(crate) rb_index_shift: u8,
     pub(crate) rb_slice_index_shift: u8,
 
-    pub(crate) flags: u16,
+    pub(crate) flags: AtomicU16,
     encrypted: AtomicBool,
     pub(crate) l2_slice_entries: u32,
     pub(crate) in_cluster_offset_mask: usize,
@@ -123,40 +123,73 @@ impl Qcow2Info {
             l2_cache_cnt: l2_cache_cnt.try_into()?,
             rb_cache_cnt: rb_cache_cnt.try_into()?,
             encrypted: AtomicBool::new(h.crypt_method() != 0),
-            flags: if ro { Qcow2Info::READ_ONLY } else { 0 }
-                | if h.incompatible_features() & 16 != 0 {
-                    Self::EXTENDED
-                } else {
-                    0
-                }
-                | if h.incompatible_features() & 4 != 0 {
-                    Self::EXTERNAL
-                } else {
-                    0
-                }
-                | if h.autoclear_features() & 2 != 0 {
-                    Self::RAW_DATA
-                } else {
-                    0
-                }
-                | if h.backing_filename().is_some() {
-                    Qcow2Info::HAS_BACK_FILE
-                } else {
-                    0
-                }
-                | if h.version() == 2 {
-                    Qcow2Info::VERSION_2
-                } else {
-                    0
-                }
-                | if p.is_backing_dev() {
-                    Qcow2Info::BACK_FILE
-                } else {
-                    0
-                },
+            flags: AtomicU16::new(
+                if ro { Qcow2Info::READ_ONLY } else { 0 }
+                    | if h.incompatible_features() & 16 != 0 {
+                        Self::EXTENDED
+                    } else {
+                        0
+                    }
+                    | if h.incompatible_features() & 4 != 0 {
+                        Self::EXTERNAL
+                    } else {
+                        0
+                    }
+                    | if h.autoclear_features() & 2 != 0 {
+                        Self::RAW_DATA
+                    } else {
+                        0
+                    }
+                    | if h.backing_filename().is_some() {
+                        Qcow2Info::HAS_BACK_FILE
+                    } else {
+                        0
+                    }
+                    | if h.version() == 2 {
+                        Qcow2Info::VERSION_2
+                    } else {
+                        0
+                    }
+                    | if p.is_backing_dev() {
+                        Qcow2Info::BACK_FILE
+                    } else {
+                        0
+                    },
+            ),
             rb_slice_bits,
             rb_slice_index_shift: rb_slice_entries.trailing_zeros().try_into().unwrap(),
         })
+    }
+
+    pub(crate) fn mark_used_as_backing(&self) {
+        self.flags.fetch_or(Self::BACK_FILE, Ordering::AcqRel);
+    }
+
+    pub(crate) fn refresh_header_flags(&self, h: &Qcow2Header) {
+        let preserve = self.flags.load(Ordering::Acquire) & (Self::READ_ONLY | Self::BACK_FILE);
+        let flags = preserve
+            | if h.version() == 2 { Self::VERSION_2 } else { 0 }
+            | if h.backing_filename().is_some() {
+                Self::HAS_BACK_FILE
+            } else {
+                0
+            }
+            | if h.incompatible_features() & 16 != 0 {
+                Self::EXTENDED
+            } else {
+                0
+            }
+            | if h.incompatible_features() & 4 != 0 {
+                Self::EXTERNAL
+            } else {
+                0
+            }
+            | if h.autoclear_features() & 2 != 0 {
+                Self::RAW_DATA
+            } else {
+                0
+            };
+        self.flags.store(flags, Ordering::Release);
     }
 
     #[inline(always)]
@@ -180,13 +213,13 @@ impl Qcow2Info {
         self.encrypted.store(enabled, Ordering::Release);
     }
     pub fn extended_l2(&self) -> bool {
-        self.flags & Self::EXTENDED != 0
+        self.flags.load(Ordering::Acquire) & Self::EXTENDED != 0
     }
     pub fn external_data(&self) -> bool {
-        self.flags & Self::EXTERNAL != 0
+        self.flags.load(Ordering::Acquire) & Self::EXTERNAL != 0
     }
     pub fn raw_data(&self) -> bool {
-        self.flags & Self::RAW_DATA != 0
+        self.flags.load(Ordering::Acquire) & Self::RAW_DATA != 0
     }
     pub fn l2_entry_bytes(&self) -> usize {
         if self.extended_l2() {
@@ -285,21 +318,21 @@ impl Qcow2Info {
 
     #[inline(always)]
     pub(crate) fn is_read_only(&self) -> bool {
-        self.flags & Qcow2Info::READ_ONLY != 0
+        self.flags.load(Ordering::Acquire) & Qcow2Info::READ_ONLY != 0
     }
 
     pub(crate) fn is_v2(&self) -> bool {
-        self.flags & Self::VERSION_2 != 0
+        self.flags.load(Ordering::Acquire) & Self::VERSION_2 != 0
     }
 
     #[inline(always)]
     pub(crate) fn has_back_file(&self) -> bool {
-        self.flags & Qcow2Info::HAS_BACK_FILE != 0
+        self.flags.load(Ordering::Acquire) & Qcow2Info::HAS_BACK_FILE != 0
     }
 
     #[inline(always)]
     pub fn is_back_file(&self) -> bool {
-        self.flags & Qcow2Info::BACK_FILE != 0
+        self.flags.load(Ordering::Acquire) & Qcow2Info::BACK_FILE != 0
     }
 }
 

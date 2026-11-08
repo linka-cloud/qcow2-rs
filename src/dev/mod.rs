@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 mod advanced;
 mod alloc;
+mod backing;
 mod bitmaps;
 mod cache;
 mod check;
@@ -26,6 +27,7 @@ mod repair;
 mod snapshots;
 mod write;
 use self::alloc::HostCluster;
+pub use self::backing::RebaseTarget;
 pub use self::bitmaps::BitmapInfo;
 pub use self::compression::CompressionType;
 pub use self::create::{
@@ -39,9 +41,9 @@ pub use self::snapshots::SnapshotOptions;
 
 type L2TableHandle = AsyncRwLock<L2Table>;
 
-enum Backing<T> {
+pub enum Backing<T> {
     Qcow2(Box<Qcow2Dev<T>>),
-    Raw { file: T, size: u64 },
+    Raw { file: T, size: AtomicU64 },
 }
 
 pub struct Qcow2Dev<T> {
@@ -71,6 +73,7 @@ pub struct Qcow2Dev<T> {
     // set in case that any dirty meta is made
     need_flush: AtomicBool,
     needs_repair: AtomicBool,
+    reopen_required: AtomicBool,
     flush_lock: AsyncMutex<()>,
 
     // Ordinary reads/writes share this lock. Discard takes it exclusively
@@ -83,6 +86,7 @@ pub struct Qcow2Dev<T> {
     file: T,
     data_file: Option<T>,
     data_file_name: Option<String>,
+    data_path: Option<PathBuf>,
     backing_file: Option<Backing<T>>,
     backing_format: Option<String>,
     pub info: Qcow2Info,
@@ -93,7 +97,9 @@ impl<T> std::fmt::Debug for Qcow2Dev<T> {
         let _ = write!(f, "Image path {:?}\ninfo {:?}\n", &self.path, &self.info);
         let _ = match &self.backing_file {
             Some(Backing::Qcow2(b)) => write!(f, "backing {b:?}"),
-            Some(Backing::Raw { size, .. }) => write!(f, "raw backing size {size}"),
+            Some(Backing::Raw { size, .. }) => {
+                write!(f, "raw backing size {}", size.load(Ordering::Acquire))
+            }
             _ => write!(f, "backing None"),
         };
         writeln!(f)
@@ -159,6 +165,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             secret: AsyncMutex::new(secret),
             data_file: None,
             data_file_name,
+            data_path: None,
             backing_file: None,
             backing_format,
             info,
@@ -170,6 +177,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             new_cluster: AsyncRwLock::new(Default::default()),
             need_flush: AtomicBool::new(false),
             needs_repair: AtomicBool::new(needs_repair),
+            reopen_required: AtomicBool::new(false),
             flush_lock: AsyncMutex::new(()),
             io_lock: AsyncRwLock::new(()),
         };
@@ -215,8 +223,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(())
     }
 
+    /// Attach payload storage together with its actual path for alias checks.
+    pub fn set_data_file_with_path(&mut self, file: T, path: PathBuf) -> Qcow2Result<()> {
+        self.set_data_file(file)?;
+        self.data_path = Some(path);
+        Ok(())
+    }
     pub(crate) fn set_raw_backing(&mut self, file: T, size: u64) {
-        self.backing_file = Some(Backing::Raw { file, size });
+        self.backing_file = Some(Backing::Raw {
+            file,
+            size: AtomicU64::new(size),
+        });
     }
 
     #[inline(always)]
@@ -224,6 +241,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.need_flush.store(val, Ordering::Relaxed);
     }
     pub(crate) fn ensure_usable(&self) -> Qcow2Result<()> {
+        if self.reopen_required.load(Ordering::Acquire) {
+            return Err(
+                "Close and reopen the image after an interrupted backing/layout change".into(),
+            );
+        }
         if self.needs_repair.load(Ordering::Acquire) {
             return Err("Image requires refcount repair before guest I/O".into());
         }

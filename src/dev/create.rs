@@ -246,6 +246,7 @@ pub struct ImageCapabilities {
     pub snapshots: u32,
     pub writable: bool,
     pub needs_repair: bool,
+    pub reopen_required: bool,
     pub snapshot_creation: bool,
     pub compressed_writes: bool,
     pub bitmap_management: bool,
@@ -276,6 +277,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             snapshots: h.nb_snapshots(),
             writable: !self.info.is_read_only(),
             needs_repair: self.needs_repair.load(Ordering::Acquire),
+            reopen_required: self.reopen_required.load(Ordering::Acquire),
             snapshot_creation: !self.info.is_read_only()
                 && !self.info.external_data()
                 && self.info.refcount_order() != 0,

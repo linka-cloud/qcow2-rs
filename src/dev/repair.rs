@@ -27,6 +27,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.new_cluster.write().await.clear();
         let h = self.header.read().await;
         self.info.set_virtual_size(h.size());
+        self.info.refresh_header_flags(&h);
         self.info.set_encrypted(h.crypt_method() != 0);
         let l1_size = (h.l1_table_entries() * 8)
             .align_up(self.info.cluster_size())
@@ -186,6 +187,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Explicitly reconstruct refcounts. Structural overlaps are never repaired.
     pub async fn repair_refcounts(&self) -> Qcow2Result<()> {
         let _io = self.io_lock.write().await;
+        if self.reopen_required.load(Ordering::Acquire) {
+            return Err(invalid(
+                "Close and reopen before repairing an interrupted layout/backing change",
+            ));
+        }
         if self.info.is_read_only() {
             return Err(invalid("Repair requires a writable image"));
         }

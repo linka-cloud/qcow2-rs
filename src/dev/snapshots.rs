@@ -15,7 +15,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(self.snapshot_directory().await?.0)
     }
 
-    async fn replace_snapshot_directory(&self, snapshots: &[Snapshot]) -> Qcow2Result<()> {
+    pub(crate) async fn replace_snapshot_directory(
+        &self,
+        snapshots: &[Snapshot],
+    ) -> Qcow2Result<()> {
         let mut bytes = Vec::new();
         for s in snapshots {
             if s.id.len() > u16::MAX as usize || s.name.len() > u16::MAX as usize {

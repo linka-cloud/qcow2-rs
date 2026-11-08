@@ -189,3 +189,215 @@ async fn external_failures_retain_dirty_state_and_repair_raw_consistency() {
         assert!(std::fs::read(&data).unwrap().iter().all(|b| *b == 0));
     }
 }
+
+#[tokio::test]
+async fn safe_rebase_preserves_snapshots_and_unsafe_rebase_tracks_changes() {
+    use qcow2_rs::tokio_io::Qcow2IoTokio;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disk.qcow2");
+    let a = dir.path().join("a.raw");
+    let b = dir.path().join("b.raw");
+    std::fs::write(&a, vec![0x5a; 1 << 20]).unwrap();
+    std::fs::write(&b, vec![0xa7; 1 << 20]).unwrap();
+    let options = CreateOptions {
+        size: 1 << 20,
+        backing: Some(BackingFile {
+            path: "a.raw".into(),
+            format: Some(BackingFormat::Raw),
+        }),
+        ..Default::default()
+    };
+    create_qcow2(&path, &options).await.unwrap();
+    let mut dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+        .await
+        .unwrap();
+    dev.create_snapshot(
+        SnapshotOptions {
+            id: "saved".into(),
+            ..Default::default()
+        },
+        b"VM state",
+    )
+    .await
+    .unwrap();
+    dev.create_bitmap("tracking", 9, true).await.unwrap();
+    let source = Qcow2IoTokio::try_new(&b, true, false).await.unwrap();
+    dev.rebase(
+        Some(RebaseTarget {
+            file: BackingFile {
+                path: "b.raw".into(),
+                format: None,
+            },
+            source: Backing::raw(source, 1 << 20),
+        }),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    assert!(dev
+        .read_bitmap("tracking")
+        .await
+        .unwrap()
+        .iter()
+        .all(|b| *b == 0));
+    dev.restore_snapshot("saved").await.unwrap();
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    let mut state = vec![0; 8];
+    dev.read_snapshot_vm_state("saved", 0, &mut state)
+        .await
+        .unwrap();
+    assert_eq!(state, b"VM state");
+    dev.rebase(None, true).await.unwrap();
+    assert!(!dev.capabilities().await.raw_external_data);
+    dev.check().await.unwrap();
+    drop(dev);
+    check(&path);
+    let other = dir.path().join("unsafe.qcow2");
+    create_qcow2(&other, &options).await.unwrap();
+    let mut dev = qcow2_setup_dev_tokio(&other, &options.open_params)
+        .await
+        .unwrap();
+    dev.create_bitmap("tracking", 9, true).await.unwrap();
+    let source = Qcow2IoTokio::try_new(&b, true, false).await.unwrap();
+    dev.rebase(
+        Some(RebaseTarget {
+            file: BackingFile {
+                path: "b.raw".into(),
+                format: None,
+            },
+            source: Backing::raw(source, 1 << 20),
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0xa7));
+    assert!(dev
+        .read_bitmap("tracking")
+        .await
+        .unwrap()
+        .iter()
+        .all(|b| *b == 0xff));
+    dev.check().await.unwrap();
+}
+
+#[tokio::test]
+async fn commit_to_qcow2_preserves_source_and_target_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.qcow2");
+    let overlay = dir.path().join("overlay.qcow2");
+    let options = CreateOptions {
+        size: 1 << 20,
+        ..Default::default()
+    };
+    create_qcow2(&base, &options).await.unwrap();
+    let target = qcow2_setup_dev_tokio(&base, &options.open_params)
+        .await
+        .unwrap();
+    let mut whole = Qcow2IoBuf::<u8>::new(1 << 20);
+    whole.fill(0x5a);
+    target.write_at(&whole, 0).await.unwrap();
+    target
+        .create_snapshot(
+            SnapshotOptions {
+                id: "base-old".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let options = CreateOptions {
+        backing: Some(BackingFile {
+            path: "base.qcow2".into(),
+            format: Some(BackingFormat::Qcow2),
+        }),
+        ..options
+    };
+    create_qcow2(&overlay, &options).await.unwrap();
+    let source = qcow2_setup_dev_tokio(&overlay, &options.open_params)
+        .await
+        .unwrap();
+    source
+        .create_snapshot(
+            SnapshotOptions {
+                id: "source-old".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    whole[..512].fill(0xa7);
+    source.write_at(&whole[..512], 512).await.unwrap();
+    source.commit_to(&target, true).await.unwrap();
+    source.read_at(&mut whole, 0).await.unwrap();
+    assert!(whole[..512].iter().all(|b| *b == 0x5a));
+    assert!(whole[512..1024].iter().all(|b| *b == 0xa7));
+    target.read_at(&mut whole, 0).await.unwrap();
+    assert!(whole[512..1024].iter().all(|b| *b == 0xa7));
+    source.check().await.unwrap();
+    target.check().await.unwrap();
+    source.restore_snapshot("source-old").await.unwrap();
+    source.read_at(&mut whole, 0).await.unwrap();
+    assert!(whole.iter().all(|b| *b == 0x5a));
+    drop(source);
+    target.restore_snapshot("base-old").await.unwrap();
+    target.read_at(&mut whole, 0).await.unwrap();
+    assert!(whole.iter().all(|b| *b == 0x5a));
+    drop(target);
+    check(&base);
+    check(&overlay);
+}
+#[tokio::test]
+async fn raw_backing_commit_preserves_tail_and_refreshes_empty_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.raw");
+    let overlay = dir.path().join("overlay.qcow2");
+    std::fs::write(&base, vec![0x5a; 2 << 20]).unwrap();
+    let options = CreateOptions {
+        size: 1 << 20,
+        backing: Some(BackingFile {
+            path: "base.raw".into(),
+            format: Some(BackingFormat::Raw),
+        }),
+        ..Default::default()
+    };
+    create_qcow2(&overlay, &options).await.unwrap();
+    let source = qcow2_setup_dev_tokio(&overlay, &options.open_params)
+        .await
+        .unwrap();
+    source
+        .create_snapshot(
+            SnapshotOptions {
+                id: "old".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0xa7);
+    source.write_at(&buf, 512).await.unwrap();
+    let raw = qcow2_rs::tokio_io::Qcow2IoTokio::try_new(&base, false, false)
+        .await
+        .unwrap();
+    source.commit_to_raw(&raw, &base, true).await.unwrap();
+    let bytes = std::fs::read(&base).unwrap();
+    assert_eq!(bytes.len(), 2 << 20);
+    assert!(bytes[..512].iter().all(|b| *b == 0x5a));
+    assert!(bytes[512..1024].iter().all(|b| *b == 0xa7));
+    assert!(bytes[1024..].iter().all(|b| *b == 0x5a));
+    source.read_at(&mut buf, 512).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0xa7));
+    source.restore_snapshot("old").await.unwrap();
+    source.read_at(&mut buf, 512).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0x5a));
+    source.check().await.unwrap();
+}

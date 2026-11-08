@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[repr(Rust, packed)]
 pub(crate) struct Qcow2RawHeader {
     /// QCOW magic string ("QFI\xfb")
@@ -235,7 +235,7 @@ pub enum Qcow2HeaderExtension {
     Unknown { extension_type: u32, data: Vec<u8> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qcow2Header {
     raw: Qcow2RawHeader,
     // Preserve optional fields introduced after the last field we understand.
@@ -796,6 +796,15 @@ impl Qcow2Header {
         self.raw.version
     }
 
+    pub(crate) fn set_backing(&mut self, name: Option<String>, format: Option<String>) {
+        self.backing_filename = name;
+        self.extensions
+            .retain(|e| !matches!(e, Qcow2HeaderExtension::BackingFileFormat(_)));
+        if let Some(format) = format {
+            self.extensions
+                .push(Qcow2HeaderExtension::BackingFileFormat(format));
+        }
+    }
     pub(crate) fn set_crypt_method(&mut self, method: u32) {
         self.raw.crypt_method = method;
     }

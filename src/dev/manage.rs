@@ -12,6 +12,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             return Ok(());
         }
         let _io = self.io_lock.write().await;
+        self.preallocate_locked(mode).await
+    }
+    pub(crate) async fn preallocate_locked(&self, mode: Preallocation) -> Qcow2Result<()> {
         self.begin_transaction().await?;
         let result = async {
             let h = self.header.read().await;
@@ -121,7 +124,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 }
 
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
-    async fn stage_payload(&self, data: &mut [u8], guest: u64) -> Qcow2Result<u64> {
+    pub(crate) async fn stage_payload(&self, data: &mut [u8], guest: u64) -> Qcow2Result<u64> {
         if !self.info.external_data() {
             return self.allocate_payload(data, guest).await;
         }
@@ -146,6 +149,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Inactive snapshots retain their original contents and disk sizes.
     pub async fn resize(&self, new_size: u64, allow_shrink: bool) -> Qcow2Result<()> {
         let _io = self.io_lock.write().await;
+        self.resize_locked(new_size, allow_shrink).await
+    }
+    pub(crate) async fn resize_locked(&self, new_size: u64, allow_shrink: bool) -> Qcow2Result<()> {
         let old_size = self.info.virtual_size();
         if new_size == old_size {
             return Ok(());

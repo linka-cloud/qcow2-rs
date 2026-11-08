@@ -137,7 +137,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             Some(Backing::Qcow2(backing)) => backing.read_at_for_backing(buf, offset).await,
             Some(Backing::Raw { file, size }) => {
                 buf.fill(0);
-                let valid = size.saturating_sub(offset).min(buf.len() as u64) as usize;
+                let valid = size
+                    .load(Ordering::Acquire)
+                    .saturating_sub(offset)
+                    .min(buf.len() as u64) as usize;
                 if valid != 0 && file.read_to(offset, buf).await? < valid {
                     return Err("Short read from raw backing file".into());
                 }
