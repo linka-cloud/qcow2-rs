@@ -84,25 +84,46 @@ pub async fn qcow2_alloc_dev<T: Qcow2IoOps>(
 #[macro_export]
 macro_rules! qcow2_setup_dev_fn {
     ($type:ty, $fn_name: ident) => {
-        #[async_recursion(?Send)]
         pub async fn $fn_name(
             path: &Path,
             params: &Qcow2DevParams,
         ) -> Qcow2Result<Qcow2Dev<$type>> {
-            let io = <$type>::try_new(path, params.is_read_only(), params.is_direct_io()).await?;
-            let (mut dev, backing) = qcow2_alloc_dev(&path, io, params).await?;
-            match backing {
-                Some(back_path) => {
-                    let mut p = params.clone();
-                    p.mark_backing_dev(Some(true));
-                    let bdev = $fn_name(&back_path.as_path(), &p).await?;
-                    dev.set_backing_dev(Box::new(bdev));
+            #[async_recursion(?Send)]
+            async fn open_chain(
+                path: &Path,
+                params: &Qcow2DevParams,
+                ancestors: &mut std::collections::HashSet<PathBuf>,
+            ) -> Qcow2Result<Qcow2Dev<$type>> {
+                if ancestors.len() >= 256 {
+                    return Err("Backing chain exceeds the supported depth of 256".into());
                 }
-                _ => {}
-            };
+                if !ancestors.insert(std::fs::canonicalize(path)?) {
+                    return Err("Cycle in qcow2 backing chain".into());
+                }
+                let io =
+                    <$type>::try_new(path, params.is_read_only(), params.is_direct_io()).await?;
+                let (mut dev, backing) = qcow2_alloc_dev(&path, io, params).await?;
+                match backing {
+                    Some(back_path) => {
+                        let back_path = if back_path.is_absolute() {
+                            back_path
+                        } else {
+                            path.parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .join(back_path)
+                        };
+                        let mut p = params.clone();
+                        p.mark_backing_dev(Some(true));
+                        let bdev = open_chain(&back_path, &p, ancestors).await?;
+                        dev.set_backing_dev(Box::new(bdev));
+                    }
+                    _ => {}
+                };
 
-            dev.__qcow2_prep_io().await?;
-            Ok(dev)
+                dev.__qcow2_prep_io().await?;
+                Ok(dev)
+            }
+            open_chain(path, params, &mut std::collections::HashSet::new()).await
         }
     };
 }
@@ -119,19 +140,39 @@ qcow2_setup_dev_fn!(crate::tokio_io::Qcow2IoTokio, qcow2_setup_dev_tokio);
 macro_rules! qcow2_setup_dev_fn_sync {
     ($type:ty, $fn_name: ident) => {
         pub fn $fn_name(path: &Path, params: &Qcow2DevParams) -> Qcow2Result<Qcow2Dev<$type>> {
-            let io = <$type>::try_new(path, params.is_read_only(), params.is_direct_io())?;
-            let (mut dev, backing) = qcow2_alloc_dev_sync(&path, io, params)?;
-            match backing {
-                Some(back_path) => {
-                    let mut p = params.clone();
-                    p.mark_backing_dev(Some(true));
-                    let bdev = $fn_name(&back_path.as_path(), &p)?;
-                    dev.set_backing_dev(Box::new(bdev));
+            fn open_chain(
+                path: &Path,
+                params: &Qcow2DevParams,
+                ancestors: &mut std::collections::HashSet<PathBuf>,
+            ) -> Qcow2Result<Qcow2Dev<$type>> {
+                if ancestors.len() >= 256 {
+                    return Err("Backing chain exceeds the supported depth of 256".into());
                 }
-                _ => {}
-            };
+                if !ancestors.insert(std::fs::canonicalize(path)?) {
+                    return Err("Cycle in qcow2 backing chain".into());
+                }
+                let io = <$type>::try_new(path, params.is_read_only(), params.is_direct_io())?;
+                let (mut dev, backing) = qcow2_alloc_dev_sync(&path, io, params)?;
+                match backing {
+                    Some(back_path) => {
+                        let back_path = if back_path.is_absolute() {
+                            back_path
+                        } else {
+                            path.parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .join(back_path)
+                        };
+                        let mut p = params.clone();
+                        p.mark_backing_dev(Some(true));
+                        let bdev = open_chain(&back_path, &p, ancestors)?;
+                        dev.set_backing_dev(Box::new(bdev));
+                    }
+                    _ => {}
+                };
 
-            Ok(dev)
+                Ok(dev)
+            }
+            open_chain(path, params, &mut std::collections::HashSet::new())
         }
     };
 }
