@@ -433,7 +433,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         while let Some(idx) = rt.pop_dirty_blk_idx(None) {
             let start = idx << self.info.block_size_shift;
             let size = 1 << self.info.block_size_shift;
-            self.flush_table(rt, start, size).await?
+            if let Err(err) = self.flush_table(rt, start, size).await {
+                rt.set_dirty((start >> 3) as usize);
+                return Err(err);
+            }
         }
 
         Ok(())
@@ -458,12 +461,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let start = key_fn((idx as u64) << bs_bits);
             let end = key_fn(((idx + 1) as u64) << bs_bits);
 
-            if self.flush_cache(cache, start, end).await? {
-                // order cache flush and the upper layer table
-                self.call_fsync(0, usize::MAX, 0).await?;
+            let result = async {
+                if self.flush_cache(cache, start, end).await? {
+                    self.call_fsync(0, usize::MAX, 0).await?;
+                }
+                self.flush_table(rt, idx << bs_bits, 1 << bs_bits).await
             }
-            self.flush_table(rt, idx << bs_bits, 1 << bs_bits).await?;
-            Ok(false)
+            .await;
+            if result.is_err() {
+                rt.set_dirty(((idx << bs_bits) >> 3) as usize);
+            }
+            result.map(|_| false)
         } else {
             // flush cache without holding top table read lock
             if self.flush_cache(cache, 0, usize::MAX).await? {
