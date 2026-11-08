@@ -22,7 +22,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Install required system packages
 # Ubuntu/Debian:
-sudo apt-get install qemu-utils build-essential
+sudo apt-get install qemu-utils build-essential pkg-config libssl-dev
 
 # Fedora/RHEL:
 sudo dnf install qemu-img gcc
@@ -45,7 +45,7 @@ cargo build --all-features
 RUST_LOG=debug cargo test -- --nocapture
 
 # Test specific IO backend
-cargo test uring_io --features="tokio-uring"
+cargo test --test uring_io --test phase4_backends --test management_backends
 
 # Generate documentation with private items
 cargo doc --no-deps --document-private-items --open
@@ -244,7 +244,8 @@ impl<T> DeviceGuard<T> {
 
 impl<T> Drop for DeviceGuard<T> {
     fn drop(&mut self) {
-        // Cache is automatically flushed via RAII
+        // Drop does not flush metadata. Call flush_meta().await explicitly
+        // before releasing this guard or shutting down the runtime.
     }
 }
 ```
@@ -259,15 +260,14 @@ impl<T> Drop for DeviceGuard<T> {
 cargo test test_format_qcow2
 cargo test test_compress_read_write
 
-# Run with different cluster sizes
-CLUSTER_BITS=16 cargo test
-CLUSTER_BITS=20 cargo test  # 1MB clusters
+# Validate every supported cluster size/refcount width against a byte model
+cargo test --test management_matrix -- --nocapture
 ```
 
 **IO Backend Tests:**
 ```bash
-# Test tokio backend
-cargo test sync_io
+# Test Tokio plus buffered/direct synchronous and io_uring management
+cargo test --test management_backends
 
 # Test io_uring backend (Linux only)
 cargo test uring_io
@@ -284,9 +284,28 @@ cargo run -- check test.qcow2
 cargo run -- info test.qcow2
 
 # Round-trip conversion testing
-cargo run -- convert -f raw -O qcow2 -o test.qcow2 /dev/zero
+cargo run -- convert -f raw -O qcow2 -o test.qcow2 source.raw
 cargo run -- convert -f qcow2 -O raw -o test.raw test.qcow2
 ```
+
+### Management parity and interruption checks
+
+`tests/management_matrix.rs` runs fixed-seed operations against an independent
+byte model and QEMU across all cluster sizes/refcount encodings. The matrix
+includes resize/preallocation and separate amend/rebase/commit round trips.
+`tests/management_backends.rs` runs the complete workflow with source and base
+snapshots under each applicable backend and I/O mode, with encrypted/plaintext
+payloads. `tests/management_contract.rs` checks that rejected operations leave
+all storage unchanged and that allocation failures remain recoverable.
+
+`tests/crash_management.rs` spawns this test binary in a child, pauses its backend
+at an I/O checkpoint, and kills it from the parent. The parent reopens, explicitly
+repairs, and validates guest bytes, snapshot VM state, refcounts, and external raw
+payload consistency. The checkpoint timeout and kill-on-drop guard prevent a
+failed harness from leaving background workers. These are process-crash tests;
+they preserve the host kernel's cache and do not simulate torn sectors or actual
+power loss. CI runs the suites in debug/release on Linux, Windows, macOS, and a native
+FreeBSD VM (Tokio and synchronous backends).
 
 ### Custom Test Setup
 
@@ -330,15 +349,15 @@ async fn test_custom_scenario() -> qcow2_rs::error::Qcow2Result<()> {
 # Enable detailed logging
 RUST_LOG=qcow2_rs=debug cargo test test_name -- --nocapture
 
-# Test with specific parameters
-CLUSTER_BITS=18 REFCOUNT_ORDER=4 cargo test
+# Process termination, non-mutating rejection, and allocation failure recovery
+cargo test --test crash_management --test management_contract -- --nocapture
 
 # Memory leak detection (requires valgrind)
 valgrind --tool=memcheck --leak-check=full \
     cargo test --release test_name
 
 # Performance profiling
-cargo test --release test_name -- --profile-time 10
+cargo test --release --test management_matrix -- --nocapture
 ```
 
 ## Performance Considerations

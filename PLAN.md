@@ -636,3 +636,78 @@ Final validation for this checkpoint:
 - Non-Linux execution, physical power-loss/torn-sector testing, and a performance
   qualification matrix were not run locally. These are validation limits, not
   claims of additional implemented algorithms or recovery guarantees.
+
+
+## Validation and management-parity follow-up
+
+The image-management parity APIs were already implemented at the preceding
+checkpoint. This follow-up validates the complete workflows and closes the
+remaining automated process-interruption and platform-CI gaps, without treating
+previous source-level claims as runtime evidence.
+
+| Commit | Strategy and evidence |
+| --- | --- |
+| `4ee181c` | Kill instrumented child processes at 18 checkpoints across resize, external raw resize, amendment, preallocation, rebase, and commit |
+| `e209d03` | Seeded guest-byte model over 23 v2/v3 geometries, covering every cluster size and refcount width, with independent QEMU check/compare/export |
+| `292dea8` | Verify read-only/invalid management operations leave files unchanged and disk-full reservation failure is recoverable |
+| `06e9b30` | Run full snapshot-preserving management workflows across Tokio, synchronous, and io_uring backends, buffered/direct and plaintext/encrypted |
+| `b3db448` | Add macOS runtime CI, modern Windows QEMU fixture validation, and all-target Clippy on hosted runtime platforms |
+| `136b84a` | Add native FreeBSD VM debug/release execution for Tokio and synchronous backends |
+
+The process-crash harness waits for a named I/O checkpoint, kills the child
+without unwinding or running device destructors, and reopens the images in the
+parent. Checkpoints include durable dirty marking, before/after publication, and
+a partial destination payload write during commit. Repair must recover valid
+refcounts and preserve guest bytes, snapshot disk contents, and VM state. Raw
+external recovery must restore both the payload bytes and file length. A failed
+or timed-out worker is killed/reaped so the harness cannot silently pass without
+exercising its requested checkpoint.
+
+The deterministic model alternates native and QEMU fixture origins. It checks
+neighboring bytes after seeded writes/zeros, whole-cluster discard with backing,
+shrink/regrow, all preallocation policies, close/reopen, and snapshot restore.
+Separate multi-representation workflows compare amendment, preserving rebase,
+and commit (including backing tails and inactive snapshots) against both the
+model and QEMU. The regression reports its geometry for reproducibility.
+Unsupported old-QEMU fixture checks are gated; Windows CI now requires modern
+extended-L2/external/compression/encryption options before running the suite.
+
+The backend workflow covers ten local combinations: plaintext/encrypted Tokio,
+plaintext/encrypted synchronous buffered/direct I/O, and plaintext/encrypted
+io_uring buffered/direct I/O. Each runs snapshot/VM-state creation, preallocation,
+write, growth/shrink, standard-to-extended conversion, commit into a base with its
+own snapshot, flattening, and restoration of both source/destination snapshots.
+
+Run the focused strategies with:
+
+```sh
+cargo test --test crash_management -- --nocapture
+cargo test --test management_matrix -- --nocapture
+cargo test --test management_contract --test management_backends
+```
+
+The full geometry matrix deliberately exercises large metadata objects and can
+take several minutes in either build profile. Seeds and fixture dimensions are fixed;
+no user disks, external services, or manually filled filesystems are involved.
+CI runs debug and release tests on Linux, Windows, macOS, and a native FreeBSD VM. The Windows fixture
+package follows [QEMU's MSYS2 installation guidance](https://www.qemu.org/download/)
+and uses the [MSYS2 image-utility package](https://packages.msys2.org/packages/mingw-w64-x86_64-qemu-image-util).
+FreeBSD uses a [native VM action](https://github.com/vmactions/freebsd-vm) with
+Tokio/synchronous backends and system Rust/QEMU/OpenSSL packages.
+Non-Linux runtime outcomes require those remote jobs; editing their configuration
+is not evidence that they have executed successfully. Killing a process retains
+the host kernel's filesystem cache and does not emulate physical power loss or
+a torn disk sector; those recovery guarantees remain outside the supported scope.
+
+Validation results for this follow-up:
+
+- Full `cargo test --quiet`: **164 passed, 0 failed, 0 ignored**, across 31 targets
+  including the binary and documentation targets.
+- Optimized `cargo test --release --test crash_management --test management_matrix
+  --test management_contract --test management_backends --quiet`: **9 passed,
+  0 failed, 0 ignored**. The process-kill and 23-geometry checks pass in both profiles.
+- `cargo fmt --check`, `git diff --check`, and
+  `cargo clippy --all-targets --no-deps`: passed; Clippy reports existing warnings.
+- The workflow parses as YAML with Linux, Windows, macOS, FreeBSD, and cross-build
+  jobs. This session executed Linux tests only; remote platform jobs remain
+  unexecuted here. No physical power-loss or torn-sector guarantees are inferred.

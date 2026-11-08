@@ -304,6 +304,34 @@ be installed
 - built CI covers 'carget test' on both ubuntu and windows
 
 
+## Management validation
+
+The management APIs above have end-to-end coverage for native and QEMU-created
+images. A deterministic byte model covers all supported cluster sizes and all
+seven refcount widths, including writes, zeros, backing discard, resize,
+preallocation, amendment, rebase/commit, and snapshot restoration. QEMU independently
+checks metadata and compares/exports the resulting guest bytes.
+
+```sh
+cargo test --test management_matrix -- --nocapture
+cargo test --test management_contract --test management_backends
+cargo test --test crash_management -- --nocapture
+```
+
+The crash regression kills separate processes at 18 transaction checkpoints,
+then verifies repair, guest bytes, snapshots/VM state, and raw external consistency.
+Backend workflows run with plaintext/encrypted backing chains under Tokio,
+synchronous buffered/direct I/O, and Linux io_uring buffered/direct I/O. The full
+geometry matrix can take several minutes in either build profile.
+
+CI runs debug/release tests on Linux, Windows, macOS, and a native FreeBSD VM.
+The three hosted platforms also run all-target Clippy;
+Windows requires a modern QEMU fixture tool so advanced-feature checks execute.
+The new non-Linux jobs were configured here but have not been run locally.
+Process termination tests retain the host filesystem cache; they do not establish
+physical power-loss or torn-sector recovery guarantees. See [PLAN.md](PLAN.md)
+for the current validation checkpoint and implementation limits.
+
 ## License
 
 This project is licensed under MIT OR Apache.
