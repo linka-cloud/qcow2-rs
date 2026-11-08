@@ -40,8 +40,36 @@ Dependencies are now available. Validation after this batch:
 - `cargo clippy --all-targets --no-deps`: fails on existing unchecked read/write
   amounts in unchanged integration tests (`clippy::unused_io_amount`).
 
-This batch does not complete Phase 1. Autoclear consistency, discard safety,
-broader malformed-metadata validation, and allocation growth remain open.
+The first batch did not complete Phase 1. Autoclear consistency and discard
+safety were addressed in the second batch below; broader malformed-metadata
+validation and allocation growth remain open.
+
+Second batch:
+
+| Commit | Change |
+| --- | --- |
+| `711b259` | Clear autoclear flags durably before writes/discard, with retryable failure handling and aligned direct I/O |
+| `cf697bb` | Persist mapping removal before discard reclamation; exclude concurrent reads/writes and skip shared clusters |
+| `3809d4c` | Reject malformed/duplicate extensions, invalid end markers, padding overlap, and backing-name/header overlap |
+| `a7493be` | Keep bitmap fixtures compatible with older QEMU and scope test borrows before awaits |
+
+Second-batch validation: `cargo test` passes all 70 tests, including io_uring.
+Formatting and Clippy for the library plus new regression targets pass (Clippy
+emits warnings). The existing all-target Clippy failures noted above remain.
+Failure injection verifies that autoclear write/fsync errors prevent guest
+mutation and that discard metadata write/fsync errors do not free or punch the
+affected host cluster. A gated reclamation test verifies that reads and writes
+wait until discard completes. Shared-data and backing-image fixtures pass
+`qemu-img check`; malformed feature-name records now return errors instead of
+panicking.
+
+Discard remains advisory: shared/compressed clusters are skipped, and clearing
+an overlay mapping reveals backing data. It now takes an exclusive device I/O
+lock and flushes mapping removal before reclaiming each cluster, trading discard
+throughput for safety. Failures can leave allocated leaks for later repair.
+Persistent bitmap contents are invalidated, not tracked or repaired. The bitmap
+fixture test skips only when the installed QEMU lacks the bitmap subcommand;
+the other autoclear tests still run.
 
 The baseline is complete on-disk format support for QCOW2 versions 2 and 3,
 including safe reads, writes, metadata preservation, and recovery where
