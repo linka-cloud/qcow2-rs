@@ -10,9 +10,38 @@ accepted without the handling needed to use them safely.
 
 This plan is based on source and existing-test inspection, compared with the
 [QEMU QCOW2 specification](https://www.qemu.org/docs/master/interop/qcow2.html).
-The findings are source-level observations, not runtime-confirmed results.
+The initial findings were source-level observations, not runtime-confirmed results.
 `cargo test --locked --offline --lib` could not start because `crypto-hash`
 was missing from the local dependency cache.
+
+### Implementation progress
+
+The first Phase 1 batch is implemented in separate commits:
+
+| Commit | Change |
+| --- | --- |
+| `d129a0e` | Reject encrypted images before guest I/O; propagate device setup errors |
+| `2b57774` | Reject writable internal-snapshot images while retaining read-only access |
+| `82770c3` | Parse/serialize v2 headers and validate version-specific header layouts |
+| `7be7ffa` | Preserve header lengths, unknown header fields, and extensions on rewrite |
+| `521bd28` | Support default caches with small clusters and reject invalid geometry |
+
+Dependencies are now available. Validation after this batch:
+
+- `cargo test`: all 59 tests passed, including the Linux io_uring backend.
+- New regressions cover unsupported-feature admission without file modification,
+  malformed layouts, v2 backing names, unknown-header preservation, and invalid
+  block/cache parameters.
+- QEMU-created v2 and 512-byte through 4 KiB cluster fixtures pass writes,
+  flush/reopen byte checks, and `qemu-img check`.
+- `cargo fmt --check`: passed.
+- `cargo clippy --lib --test admission --test versions --no-deps`: passed with
+  warnings.
+- `cargo clippy --all-targets --no-deps`: fails on existing unchecked read/write
+  amounts in unchanged integration tests (`clippy::unused_io_amount`).
+
+This batch does not complete Phase 1. Autoclear consistency, discard safety,
+broader malformed-metadata validation, and allocation growth remain open.
 
 The baseline is complete on-disk format support for QCOW2 versions 2 and 3,
 including safe reads, writes, metadata preservation, and recovery where
@@ -20,7 +49,7 @@ applicable. QEMU implementation limits can remain where explicitly validated
 and documented. Unsupported or invalid feature combinations must fail with
 clear errors; full support does not mean accepting every combination.
 
-## Current feature coverage
+## Baseline feature coverage (before Phase 1)
 
 | Feature | Current implementation |
 | --- | --- |
@@ -200,7 +229,7 @@ behavior during open.
 
 ## Validation strategy
 
-- [ ] Restore dependency availability and run library/integration tests before
+- [x] Restore dependency availability and run library/integration tests before
       treating the source assessment as a verified baseline.
 - [ ] Generate fixtures with QEMU for v2/v3, supported cluster sizes and all
       refcount widths, backing chains, zero/preallocated clusters, compression,
