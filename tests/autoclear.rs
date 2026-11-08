@@ -44,6 +44,9 @@ async fn reads_preserve_autoclear_flags_and_writes_clear_them() {
 
 #[derive(Default)]
 struct State {
+    pause_payload: Cell<bool>,
+    writing: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
     fail_nth_write: Cell<usize>,
     fail_write: Cell<bool>,
     fail_sync: Cell<bool>,
@@ -75,6 +78,10 @@ impl Qcow2IoOps for FaultIo {
             }
         } else {
             self.state.events.borrow_mut().push("data");
+            if self.state.pause_payload.replace(false) {
+                self.state.writing.notify_one();
+                self.state.resume.notified().await;
+            }
         }
         self.inner.write_from(offset, buf).await
     }
@@ -233,5 +240,41 @@ async fn failed_snapshot_cow_requires_recovery_and_preserves_snapshot_data() {
     dev.restore_snapshot("saved").await.unwrap();
     dev.read_at(&mut buf, 0).await.unwrap();
     assert!(buf.iter().all(|b| *b == 0x5a));
+    dev.check().await.unwrap();
+}
+
+#[tokio::test]
+async fn lazy_flush_waits_for_inflight_payload_writes() {
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let params = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(512);
+    buf.fill(0x5a);
+    dev.write_at(&buf, 0).await.unwrap();
+    dev.flush_meta().await.unwrap();
+    drop(dev);
+    let mut bytes = std::fs::read(image.path()).unwrap();
+    bytes[80..88].copy_from_slice(&1_u64.to_be_bytes());
+    std::fs::write(image.path(), bytes).unwrap();
+    let state = Rc::new(State::default());
+    let dev = fault_device(image.path(), state.clone()).await;
+    state.pause_payload.set(true);
+    let writer = dev.write_at(&buf, 0);
+    let flusher = async {
+        state.writing.notified().await;
+        let flush = dev.flush_meta();
+        tokio::pin!(flush);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut flush)
+                .await
+                .is_err()
+        );
+        let bytes = std::fs::read(image.path()).unwrap();
+        assert_eq!(u64::from_be_bytes(bytes[72..80].try_into().unwrap()) & 1, 1);
+        state.resume.notify_one();
+        flush.await.unwrap();
+    };
+    let (result, ()) = tokio::join!(writer, flusher);
+    result.unwrap();
     dev.check().await.unwrap();
 }

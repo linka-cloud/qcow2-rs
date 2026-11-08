@@ -724,9 +724,6 @@ impl Qcow2Header {
         self.raw.autoclear_features
     }
 
-    pub(crate) fn clear_autoclear_features(&mut self) {
-        self.raw.autoclear_features = 0;
-    }
     pub(crate) fn set_autoclear_features(&mut self, flags: u64) {
         self.raw.autoclear_features = flags;
     }

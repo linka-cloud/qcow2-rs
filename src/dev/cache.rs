@@ -555,7 +555,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// flush meta data in ram to disk
     pub async fn flush_meta(&self) -> Qcow2Result<()> {
-        let _io = self.io_lock.read().await;
+        // Closing a lazy-refcount transaction must exclude writers that have
+        // passed prepare_writable but have not published their mappings yet.
+        let _io = self.io_lock.write().await;
         self.flush_meta_locked().await
     }
 
