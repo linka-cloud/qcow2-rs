@@ -156,6 +156,9 @@ async fn native_luks_creation_and_direct_io_interoperate() {
     buf.fill(0xa7);
     dev.write_at(&buf, 4096).await.unwrap();
     expected[4096..8192].fill(0xa7);
+    buf.fill(0);
+    dev.read_at(&mut buf, 4096).await.unwrap();
+    assert!(buf.iter().all(|b| *b == 0xa7));
     assert!(dev.write_compressed_at(&buf, 0).await.is_err());
     dev.check().await.unwrap();
     drop(dev);
@@ -246,4 +249,66 @@ async fn malformed_luks_parameters_fail_before_mutation() {
         assert!(!error.contains("private credential"));
         assert_eq!(std::fs::read(image.path()).unwrap(), bytes);
     }
+}
+
+#[tokio::test]
+async fn backing_chain_supports_distinct_per_image_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let base = d.join("base.qcow2");
+    let top = d.join("top.qcow2");
+    qcow2_rs::utils::make_temp_qcow2_img(1 << 20, 16, 4)
+        .persist(&base)
+        .unwrap();
+    let mut p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(&base, &p).await.unwrap();
+    dev.initialize_luks(
+        b"base password",
+        qcow2_rs::dev::LuksOptions { iterations: 2000 },
+    )
+    .await
+    .unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(65536);
+    buf.fill(0x5a);
+    dev.write_at(&buf, 0).await.unwrap();
+    drop(dev);
+    let base_before = std::fs::read(&base).unwrap();
+    qemu(
+        d,
+        &[
+            "create",
+            "-f",
+            "qcow2",
+            "-u",
+            "-F",
+            "qcow2",
+            "-b",
+            "base.qcow2",
+            "top.qcow2",
+            "1M",
+        ],
+    );
+    p.set_encryption_secret(b"base password");
+    let dev = qcow2_setup_dev_tokio(&top, &p).await.unwrap();
+    dev.initialize_luks(
+        b"top password",
+        qcow2_rs::dev::LuksOptions { iterations: 2000 },
+    )
+    .await
+    .unwrap();
+    buf.fill(0xa7);
+    dev.write_at(&buf[..512], 512).await.unwrap();
+    drop(dev);
+    p.set_encryption_secret(b"top password");
+    assert!(qcow2_setup_dev_tokio(&top, &p).await.is_err());
+    p.set_image_encryption_secret(base.clone(), b"base password")
+        .unwrap();
+    let dev = qcow2_setup_dev_tokio(&top, &p).await.unwrap();
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf[..512].iter().all(|b| *b == 0x5a));
+    assert!(buf[512..1024].iter().all(|b| *b == 0xa7));
+    assert!(buf[1024..].iter().all(|b| *b == 0x5a));
+    dev.check().await.unwrap();
+    drop(dev);
+    assert_eq!(std::fs::read(&base).unwrap(), base_before);
 }

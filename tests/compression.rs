@@ -34,6 +34,9 @@ async fn codec_reads_packed_output_fallback_snapshots_and_reopen_interoperate() 
             for i in 2..11 {
                 rng.fill_bytes(&mut data[i * cs..i * cs + cs / 2]);
             }
+            // Exercise Deflate references farther back than QEMU's encoder's
+            // small window, and packed streams that cross host clusters.
+            data.copy_within(5 * cs..5 * cs + cs / 2, 5 * cs + cs / 2);
             rng.fill_bytes(&mut data[11 * cs..]);
             std::fs::write(d.join("source.raw"), &data).unwrap();
             let mut options = format!("cluster_size={cs}");
@@ -81,6 +84,16 @@ async fn codec_reads_packed_output_fallback_snapshots_and_reopen_interoperate() 
                 dev.get_mapping((11 * cs) as u64).await.unwrap().source,
                 qcow2_rs::meta::MappingSource::DataFile
             );
+            let mut crosses_boundary = false;
+            for i in 2..11 {
+                let mapping = dev.get_mapping((i * cs) as u64).await.unwrap();
+                if let (Some(host), Some(length)) =
+                    (mapping.cluster_offset, mapping.compressed_length)
+                {
+                    crosses_boundary |= (host as usize % cs) + length > cs;
+                }
+            }
+            assert!(crosses_boundary);
             dev.check().await.unwrap();
             drop(dev);
             qemu(d, &["check", "-q", "disk.qcow2"]);
