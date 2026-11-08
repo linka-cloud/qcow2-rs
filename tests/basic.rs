@@ -148,7 +148,7 @@ mod integretion {
             let raw_f = make_rand_raw_img(size, cluster_bits);
             let raw_path = raw_f.path().to_str().unwrap();
             let mut file = std::fs::File::open(raw_path).unwrap();
-            file.read(&mut buf).unwrap();
+            file.read_exact(&mut buf).unwrap();
 
             // fill the last 8k as zero
             for i in (bsize - boff)..bsize {
@@ -201,7 +201,7 @@ mod integretion {
             let raw_f = make_rand_raw_img(bsize, cluster_bits);
             let raw_path = raw_f.path().to_str().unwrap();
             let mut file = std::fs::File::open(raw_path).unwrap();
-            file.read(&mut buf).unwrap();
+            file.read_exact(&mut buf).unwrap();
             let raw_sum = hex_digest(Algorithm::MD5, &buf);
 
             let dev = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
@@ -273,7 +273,7 @@ mod integretion {
             let raw_f = make_rand_raw_img(size, cluster_bits);
             let raw_path = raw_f.path().to_str().unwrap();
             let mut file = std::fs::File::open(raw_path).unwrap();
-            file.read(&mut buf).unwrap();
+            file.read_exact(&mut buf).unwrap();
 
             let dev = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
 

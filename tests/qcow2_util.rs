@@ -17,7 +17,7 @@ mod integretion {
         let raw_p = raw_f.path().to_str().unwrap();
         let raw_sum = {
             let mut file = std::fs::File::open(raw_p).unwrap();
-            file.read(&mut buf).unwrap();
+            file.read_exact(&mut buf).unwrap();
             hex_digest(Algorithm::MD5, &buf)
         };
 
@@ -41,7 +41,7 @@ mod integretion {
         run_shell_cmd(&para);
         let raw_sum2 = {
             let mut file = std::fs::File::open(raw_p2).unwrap();
-            file.read(&mut buf).unwrap();
+            file.read_exact(&mut buf).unwrap();
             hex_digest(Algorithm::MD5, &buf)
         };
         assert!(raw_sum == raw_sum2);

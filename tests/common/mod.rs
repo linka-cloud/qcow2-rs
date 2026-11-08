@@ -33,7 +33,7 @@ pub fn calculate_raw_md5(file_path: &str, off: u64, len: usize) -> String {
     let mut buffer = vec![0_u8; len];
 
     file.seek(SeekFrom::Start(off)).unwrap();
-    file.read(&mut buffer).unwrap();
+    file.read_exact(&mut buffer).unwrap();
 
     hex_digest(Algorithm::MD5, &buffer)
 }
@@ -48,7 +48,7 @@ pub fn make_rand_raw_img(size: u64, cls_bits: usize) -> tempfile::NamedTempFile 
         let mut rng = rand::thread_rng();
         rng.fill(&mut buf[..]);
         file.seek(SeekFrom::Start(off)).unwrap();
-        file.write(&buf).unwrap();
+        file.write_all(&buf).unwrap();
     }
 
     tmp_inp
@@ -86,12 +86,12 @@ pub fn make_compressed_qcow2_img(
     {
         let mut file = std::fs::File::open(&binding).unwrap();
         let mut buf = vec![0_u8; buf_len];
-        file.read(&mut buf).unwrap();
+        file.read_exact(&mut buf).unwrap();
 
         let mut file = std::fs::File::create(tmp_inp.path()).unwrap();
         for off in (0..size).step_by(buf_len) {
             file.seek(SeekFrom::Start(off)).unwrap();
-            file.write(&buf).unwrap();
+            file.write_all(&buf).unwrap();
         }
     }
 
