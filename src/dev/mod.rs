@@ -73,6 +73,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         file: T,
     ) -> Qcow2Result<Self> {
         let h = &header;
+        if h.crypt_method() != 0 {
+            return Err(format!(
+                "qcow2 encryption method {} is not supported",
+                h.crypt_method()
+            )
+            .into());
+        }
         let bs_shift = params.get_bs_bits();
 
         debug_assert!((9..=12).contains(&bs_shift));

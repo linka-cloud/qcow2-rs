@@ -49,10 +49,7 @@ pub fn qcow2_alloc_dev_sync<T: Qcow2IoOps>(
     };
     let back_path = header.backing_filename().map(|s| PathBuf::from(s.clone()));
 
-    Ok((
-        Qcow2Dev::new(path, header, params, io).expect("new dev failed"),
-        back_path,
-    ))
+    Ok((Qcow2Dev::new(path, header, params, io)?, back_path))
 }
 
 /// Allocate one qcow2 device and qcow2 header needs to be parsed
@@ -77,10 +74,7 @@ pub async fn qcow2_alloc_dev<T: Qcow2IoOps>(
     };
     let back_path = header.backing_filename().map(|s| PathBuf::from(s.clone()));
 
-    Ok((
-        Qcow2Dev::new(path, header, params, io).expect("new dev failed"),
-        back_path,
-    ))
+    Ok((Qcow2Dev::new(path, header, params, io)?, back_path))
 }
 
 /// Build one async helper which can setup one qcow2 device

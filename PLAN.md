@@ -55,7 +55,7 @@ format coverage.
 
 Address these before advertising broader feature support:
 
-- [ ] Reject encrypted images explicitly until cryptographic I/O is implemented.
+- [x] Reject encrypted images explicitly until cryptographic I/O is implemented.
       `crypt_method` is currently parsed/displayed, but payload reads and writes
       never encrypt or decrypt.
 - [ ] Reject writable snapshot-bearing images until shared metadata and data
