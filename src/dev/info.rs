@@ -412,6 +412,10 @@ impl Qcow2DevParams {
         self.read_only = ro;
     }
 
+    pub fn set_direct_io(&mut self, enabled: bool) {
+        self.direct_io = enabled;
+    }
+
     pub fn is_direct_io(&self) -> bool {
         self.direct_io
     }

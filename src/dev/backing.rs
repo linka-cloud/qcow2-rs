@@ -20,6 +20,18 @@ impl<T> Backing<T> {
     }
 }
 impl<T: Qcow2IoOps> Qcow2Dev<T> {
+    /// The declared backing name and the format detected when the chain was opened.
+    pub async fn backing_file(&self) -> Option<BackingFile> {
+        let h = self.header.read().await;
+        h.backing_filename().map(|name| BackingFile {
+            path: PathBuf::from(name),
+            format: self.backing_file.as_ref().map(|back| match back {
+                Backing::Raw { .. } => BackingFormat::Raw,
+                Backing::Qcow2(_) => BackingFormat::Qcow2,
+            }),
+        })
+    }
+
     pub(crate) async fn read_entry_cluster(
         &self,
         entry: L2Entry,
