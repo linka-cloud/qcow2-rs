@@ -59,6 +59,10 @@ impl Qcow2IoTokio {
 
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 impl Qcow2IoOps for Qcow2IoTokio {
+    async fn set_len(&self, len: u64) -> Qcow2Result<()> {
+        self.file.lock().await.set_len(len).await?;
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     async fn reserve(&self, offset: u64, len: usize) -> Qcow2Result<()> {
         crate::ops::linux_reserve(self.fd, offset, len)

@@ -57,6 +57,14 @@ pub(crate) fn set_direct_io(fd: i32) {
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 #[rustversion::attr(since(1.75), allow(async_fn_in_trait))]
 pub trait Qcow2IoOps {
+    /// Adjust a separate data file's length after a durable metadata resize.
+    async fn set_len(&self, _len: u64) -> Qcow2Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "File resizing is unavailable",
+        )
+        .into())
+    }
     /// Reserve physical storage without discarding existing contents.
     async fn reserve(&self, _offset: u64, _len: usize) -> Qcow2Result<()> {
         Err(std::io::Error::new(

@@ -102,6 +102,13 @@ impl Qcow2IoUring {
 
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 impl Qcow2IoOps for Qcow2IoUring {
+    async fn set_len(&self, len: u64) -> Qcow2Result<()> {
+        let size = i64::try_from(len).map_err(|_| "File length overflow")?;
+        if unsafe { libc::ftruncate(self.file.as_raw_fd(), size) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     async fn reserve(&self, offset: u64, len: usize) -> Qcow2Result<()> {
         crate::ops::linux_reserve(self.file.as_raw_fd(), offset, len)

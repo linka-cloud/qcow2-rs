@@ -93,6 +93,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Rebuild using fresh metadata, never allocating from suspect refcounts.
     pub(crate) async fn rebuild_refcounts(&self) -> Qcow2Result<()> {
+        self.rebuild_refcounts_state(false).await
+    }
+
+    pub(crate) async fn rebuild_refcounts_state(&self, keep_dirty: bool) -> Qcow2Result<()> {
         let graph = self.graph().await?;
         let start = graph.counts.keys().next_back().copied().unwrap_or(0) + 1;
         let mut base = graph.counts;
@@ -153,10 +157,30 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.update_copied_flags(&counts).await?;
         self.call_fsync(0, 0, 0).await?;
         self.reload_metadata().await?;
-        let flags = self.header.read().await.incompatible_features();
-        self.store_feature_flags(flags & !3).await?;
-        self.needs_repair.store(false, Ordering::Release);
+        if self.info.raw_data() && self.needs_repair.load(Ordering::Acquire) {
+            self.reconcile_external_raw().await?;
+        }
+        if !keep_dirty {
+            let flags = self.header.read().await.incompatible_features();
+            self.store_feature_flags(flags & !3).await?;
+            self.needs_repair.store(false, Ordering::Release);
+        }
         Ok(())
+    }
+
+    async fn reconcile_external_raw(&self) -> Qcow2Result<()> {
+        let data = self.data_file.as_ref().ok_or("Missing raw external data")?;
+        let mut buf = crate::helpers::Qcow2IoBuf::<u8>::new(self.info.cluster_size());
+        for offset in (0..self.info.virtual_size()).step_by(buf.len()) {
+            self.advanced_read_at(&mut buf, offset).await?;
+            data.write_from(offset, &buf).await?;
+        }
+        if let Err(error) = data.set_len(self.info.virtual_size()).await {
+            if error.get_inner().kind() != std::io::ErrorKind::Unsupported {
+                return Err(error);
+            }
+        }
+        data.fsync(0, 0, 0).await
     }
 
     /// Explicitly reconstruct refcounts. Structural overlaps are never repaired.
