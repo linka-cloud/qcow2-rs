@@ -462,9 +462,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let end = key_fn(((idx + 1) as u64) << bs_bits);
 
             let result = async {
-                if self.flush_cache(cache, start, end).await? {
-                    self.call_fsync(0, usize::MAX, 0).await?;
-                }
+                self.flush_cache(cache, start, end).await?;
+                // Also synchronize on retries: a previous dependency write
+                // may have succeeded while its synchronization failed.
+                self.call_fsync(0, usize::MAX, 0).await?;
                 self.flush_table(rt, idx << bs_bits, 1 << bs_bits).await
             }
             .await;
@@ -521,7 +522,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 break;
             }
         }
-        Ok(())
+        self.call_fsync(0, 0, 0).await
     }
 
     //// flush mapping cache
@@ -561,6 +562,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 .flush_meta_generic(l1, &self.l2cache, |off| self.l2_slice_key_of_l1_off(off))
                 .await?;
             if done {
+                self.call_fsync(0, 0, 0).await?;
                 self.mark_need_flush(false);
                 break;
             }

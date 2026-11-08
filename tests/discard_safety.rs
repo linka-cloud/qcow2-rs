@@ -215,24 +215,27 @@ async fn discard_failure_does_not_release_or_punch_host_data() {
 
 #[tokio::test]
 async fn failed_metadata_flush_can_be_retried() {
-    let image = populated_image().await;
-    let state = Rc::new(State::default());
-    let dev = recording_device(image.path(), state.clone()).await;
-    let mut buf = Qcow2IoBuf::<u8>::new(CLUSTER);
-    buf.fill(0xa5);
-    dev.write_at(&buf, CLUSTER as u64).await.unwrap();
-    state.fail_write.set(true);
-    assert!(dev.flush_meta().await.is_err());
-    assert!(dev.need_flush_meta());
-    dev.flush_meta().await.unwrap();
-    dev.fsync_range(0, 0).await.unwrap();
-    drop(dev);
-    check(image.path());
-    let params = Qcow2DevParams::new(9, None, None, true, false);
-    let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
-    let mut read = Qcow2IoBuf::<u8>::new(CLUSTER);
-    dev.read_at(&mut read, CLUSTER as u64).await.unwrap();
-    assert_eq!(&read[..], &buf[..]);
+    for sync_failure in [false, true] {
+        let image = populated_image().await;
+        let state = Rc::new(State::default());
+        let dev = recording_device(image.path(), state.clone()).await;
+        let mut buf = Qcow2IoBuf::<u8>::new(CLUSTER);
+        buf.fill(0xa5);
+        dev.write_at(&buf, CLUSTER as u64).await.unwrap();
+        state.fail_write.set(!sync_failure);
+        state.fail_sync.set(sync_failure);
+        assert!(dev.flush_meta().await.is_err());
+        assert!(dev.need_flush_meta());
+        dev.flush_meta().await.unwrap();
+        dev.fsync_range(0, 0).await.unwrap();
+        drop(dev);
+        check(image.path());
+        let params = Qcow2DevParams::new(9, None, None, true, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        let mut read = Qcow2IoBuf::<u8>::new(CLUSTER);
+        dev.read_at(&mut read, CLUSTER as u64).await.unwrap();
+        assert_eq!(&read[..], &buf[..]);
+    }
 }
 
 #[tokio::test]
