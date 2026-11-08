@@ -4,7 +4,7 @@ use super::table::{
 };
 use crate::dev::Qcow2Info;
 use crate::error::Qcow2Result;
-use crate::helpers::Qcow2IoBuf;
+use crate::helpers::{IntAlignment, Qcow2IoBuf};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
@@ -82,15 +82,21 @@ impl RefTable {
     }
 
     /// Create a clone that covers at least `at_least_index`
-    pub fn clone_and_grow(&self, clusters: usize, cluster_size: usize, bs: usize) -> Self {
+    pub fn clone_and_grow(
+        &self,
+        at_least_index: usize,
+        allocated_clusters: usize,
+        cluster_size: usize,
+    ) -> Self {
         let entry_size = core::mem::size_of::<RefTableEntry>();
         let ram_size = self.data.len() * entry_size;
-
-        //table in ram may not reach end of reftable in disk
-        let (new_size, new_off) = if ram_size + entry_size < clusters * cluster_size {
-            (ram_size + entry_size, self.offset)
+        let new_size = std::cmp::max((at_least_index + 1) * entry_size, ram_size)
+            .align_up(cluster_size)
+            .unwrap();
+        let new_off = if new_size <= allocated_clusters * cluster_size {
+            self.offset
         } else {
-            (clusters * cluster_size + bs, None)
+            None
         };
 
         let mut new_data = Qcow2IoBuf::<RefTableEntry>::new(new_size);
@@ -100,7 +106,11 @@ impl RefTable {
         Self {
             offset: new_off,
             data: new_data,
-            dirty_blocks: RefCell::new(self.dirty_blocks.borrow().clone()),
+            dirty_blocks: RefCell::new(if new_off.is_none() {
+                (0..(new_size >> self.bs_bits) as u32).collect()
+            } else {
+                self.dirty_blocks.borrow().clone()
+            }),
             bs_bits: self.bs_bits,
         }
     }
@@ -385,6 +395,24 @@ mod tests {
         unsafe {
             assert!(u64::from_be(*raw_addr) == rcb_offset);
         };
+    }
+
+    #[test]
+    fn test_refcount_table_growth_covers_index_and_writes_all_blocks() {
+        let mut old = RefTable::new(Some(512), 512, 9);
+        old.set_refblock_offset(0, 1024);
+        let grown = old.clone_and_grow(64, 1, 512);
+        assert!(grown.in_bounds(64));
+        assert_eq!(grown.byte_size(), 1024);
+        assert_eq!(grown.get_offset(), None);
+        assert_eq!(grown.get(0).refblock_offset(), 1024);
+        for index in 64..grown.entries() {
+            assert!(grown.get(index).is_zero());
+        }
+        let dirty: Vec<_> = std::iter::from_fn(|| grown.pop_dirty_blk_idx(None)).collect();
+        assert_eq!(dirty, vec![0, 1]);
+        assert_eq!(old.get_offset(), Some(512));
+        assert_eq!(old.byte_size(), 512);
     }
 
     #[test]

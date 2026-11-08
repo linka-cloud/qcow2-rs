@@ -152,7 +152,10 @@ Address these before advertising broader feature support:
       requested entry count, and mark every relocated block for writing.
       L1 relocation now requires an exact contiguous range, releases short
       candidates, and retries the next refblock. Allocations spanning refblock
-      boundaries and refcount-table relocation still need work.
+      boundaries still need work. Refcount-table relocation now writes every
+      table block and a complete new refblock, persists dependencies before
+      publishing an aligned header, and releases the old table after dropping
+      its write lock. The larger-allocation TODO remains.
 
 Acceptance: unsupported images fail before mutation; supported images preserve
 unmodified bytes and metadata across writes, discard, flush, and reopen.

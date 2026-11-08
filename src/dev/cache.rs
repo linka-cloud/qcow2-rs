@@ -2,7 +2,7 @@ use super::*;
 use crate::cache::AsyncLruCache;
 use crate::cache::AsyncLruCacheEntry;
 use crate::error::Qcow2Result;
-use crate::helpers::qcow2_type_of;
+use crate::helpers::{qcow2_type_of, IntAlignment, Qcow2IoBuf};
 use crate::meta::{L1Entry, L1Table, L2Table, SplitGuestOffset, Table, TableEntry};
 use futures_locks::{RwLock as AsyncRwLock, RwLockWriteGuard as LockWriteGuard};
 use std::collections::hash_map::Entry;
@@ -68,8 +68,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
     }
 
-    /// Write the (already updated) header out; on failure run `rollback`
-    /// to restore the in-ram header so ram & disk stay consistent
+    /// Publish the updated header after its dependencies are durable, using
+    /// aligned I/O. Restore the in-memory fields on failure; a failed/partial
+    /// header write can still require on-disk recovery.
     pub(crate) async fn commit_header<F>(
         &self,
         h: &mut LockWriteGuard<Qcow2Header>,
@@ -78,12 +79,30 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     where
         F: FnOnce(&mut Qcow2Header),
     {
-        let buf = h.serialize_to_buf()?;
-        if let Err(err) = self.call_write(0, &buf).await {
-            rollback(h);
-            return Err(err);
+        let serialized = match h.serialize_to_buf() {
+            Ok(buf) => buf,
+            Err(err) => {
+                rollback(h);
+                return Err(err);
+            }
+        };
+        let bytes = serialized
+            .len()
+            .align_up(1_usize << self.info.block_size_shift)
+            .unwrap();
+        let mut buf = Qcow2IoBuf::<u8>::new(bytes);
+        buf.zero_buf();
+        buf[..serialized.len()].copy_from_slice(&serialized);
+        let result = async {
+            self.call_fsync(0, 0, 0).await?;
+            self.call_write(0, &buf).await?;
+            self.call_fsync(0, buf.len(), 0).await
         }
-        Ok(())
+        .await;
+        if result.is_err() {
+            rollback(h);
+        }
+        result
     }
 
     /// flush data range in (offset, len) to disk
@@ -433,8 +452,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     //// flush refcount table and block dirty data to disk
     pub(crate) async fn flush_refcount(&self) -> Qcow2Result<()> {
+        let rt = self.reftable.read().await;
+        self.flush_refcount_table(&rt).await
+    }
+
+    /// Also usable by table relocation while holding the table's write lock.
+    pub(crate) async fn flush_refcount_table(&self, rt: &RefTable) -> Qcow2Result<()> {
         loop {
-            let rt = &*self.reftable.read().await;
             let done = self
                 .flush_meta_generic(rt, &self.refblock_cache, |off| {
                     self.rb_slice_key_of_rt_off(off)
