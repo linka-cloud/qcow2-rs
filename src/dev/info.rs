@@ -33,6 +33,7 @@ impl Qcow2Info {
     const READ_ONLY: u16 = 1 << 0;
     const HAS_BACK_FILE: u16 = 1 << 1; // we have underlying backing image
     const BACK_FILE: u16 = 1 << 2; // this is one backing image, read only
+    const VERSION_2: u16 = 1 << 3;
     pub fn new(h: &Qcow2Header, p: &Qcow2DevParams) -> Qcow2Result<Qcow2Info> {
         let block_size_shift = p.get_bs_bits();
         if !(9..=12).contains(&block_size_shift) || u32::from(block_size_shift) > h.cluster_bits() {
@@ -110,11 +111,16 @@ impl Qcow2Info {
             rb_index_shift: rb_entries.trailing_zeros().try_into().unwrap(),
             block_size_shift,
             l2_slice_bits,
-            l2_cache_cnt: l2_cache_cnt.try_into().unwrap(),
-            rb_cache_cnt: rb_cache_cnt.try_into().unwrap(),
+            l2_cache_cnt: l2_cache_cnt.try_into()?,
+            rb_cache_cnt: rb_cache_cnt.try_into()?,
             flags: if ro { Qcow2Info::READ_ONLY } else { 0 }
                 | if h.backing_filename().is_some() {
                     Qcow2Info::HAS_BACK_FILE
+                } else {
+                    0
+                }
+                | if h.version() == 2 {
+                    Qcow2Info::VERSION_2
                 } else {
                     0
                 }
@@ -230,6 +236,10 @@ impl Qcow2Info {
     #[inline(always)]
     pub(crate) fn is_read_only(&self) -> bool {
         self.flags & Qcow2Info::READ_ONLY != 0
+    }
+
+    pub(crate) fn is_v2(&self) -> bool {
+        self.flags & Self::VERSION_2 != 0
     }
 
     #[inline(always)]

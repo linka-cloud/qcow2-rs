@@ -300,6 +300,57 @@ impl Qcow2Header {
         if header.header_length as u64 > cluster_size {
             return Err("qcow2 header exceeds the first cluster".into());
         }
+        let l1_bytes = u64::from(header.l1_size) * 8;
+        let max_virtual = u64::from(Self::MAX_L1_SIZE / 8) * (cluster_size / 8) * cluster_size;
+        if l1_bytes > u64::from(Self::MAX_L1_SIZE) || header.size > max_virtual {
+            return Err("qcow2 L1 table or virtual size exceeds the supported limit".into());
+        }
+        if header.size.div_ceil((cluster_size / 8) * cluster_size) > u64::from(header.l1_size) {
+            return Err("qcow2 L1 table is too small for the virtual size".into());
+        }
+        let rt_bytes = u64::from(header.refcount_table_clusters) * cluster_size;
+        if rt_bytes == 0 || rt_bytes > u64::from(Self::MAX_REFCOUNT_TABLE_SIZE) {
+            return Err("Invalid qcow2 refcount table size".into());
+        }
+        for (offset, bytes, name) in [
+            (
+                header.l1_table_offset,
+                l1_bytes.div_ceil(cluster_size) * cluster_size,
+                "L1",
+            ),
+            (header.refcount_table_offset, rt_bytes, "refcount"),
+        ] {
+            if bytes != 0
+                && (offset < cluster_size
+                    || offset
+                        .checked_add(bytes)
+                        .map(|end| end > 1_u64 << 56)
+                        .unwrap_or(true))
+            {
+                return Err(format!("Invalid qcow2 {name} table range").into());
+            }
+        }
+        if l1_bytes != 0 {
+            let l1_end = header.l1_table_offset + l1_bytes.div_ceil(cluster_size) * cluster_size;
+            let rt_end = header.refcount_table_offset + rt_bytes;
+            if header.l1_table_offset < rt_end && header.refcount_table_offset < l1_end {
+                return Err("qcow2 L1 and refcount tables overlap".into());
+            }
+        }
+        if header.nb_snapshots != 0
+            && (header.snapshots_offset < cluster_size
+                || header.snapshots_offset & (cluster_size - 1) != 0
+                || header
+                    .snapshots_offset
+                    .checked_add(u64::from(header.nb_snapshots) * 40)
+                    .map(|end| end > 1_u64 << 56)
+                    .unwrap_or(true))
+        {
+            return Err("Invalid qcow2 snapshot table range".into());
+        }
+        if header.incompatible_features & (1 << 3) == 0 && header.compression_type != 0 {
+            return Err("qcow2 compression type requires its incompatible feature bit".into());
+        }
 
         // the spec requires both tables to start at a cluster boundary,
         // and the cluster walk in check() relies on it
@@ -324,7 +375,7 @@ impl Qcow2Header {
             if offset < header.header_length as u64 {
                 return Err("Backing file name overlaps the qcow2 header".into());
             }
-            if length > 1023 {
+            if length == 0 || length > 1023 {
                 return Err(format!(
                     "Backing file name is too long ({length}, must not exceed 1023)"
                 )
@@ -413,6 +464,22 @@ impl Qcow2Header {
             backing_filename,
             extensions,
         };
+        if header.raw.autoclear_features & 1 != 0
+            && !header.extensions.iter().any(|extension| {
+                matches!(
+                    extension,
+                    Qcow2HeaderExtension::Unknown {
+                        extension_type: 0x23852875,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err("qcow2 bitmap consistency flag has no bitmap extension".into());
+        }
+        if header.raw.autoclear_features & 2 != 0 && header.raw.incompatible_features & 4 == 0 {
+            return Err("qcow2 raw data flag requires an external data file".into());
+        }
 
         if header.raw.incompatible_features != 0 {
             let feats = (0..64)
@@ -815,6 +882,8 @@ mod tests {
         buf[..4].copy_from_slice(&Qcow2Header::QCOW2_MAGIC.to_be_bytes());
         buf[4..8].copy_from_slice(&version.to_be_bytes());
         buf[20..24].copy_from_slice(&9_u32.to_be_bytes());
+        buf[48..56].copy_from_slice(&512_u64.to_be_bytes());
+        buf[56..60].copy_from_slice(&1_u32.to_be_bytes());
         if version == 3 {
             buf[96..100].copy_from_slice(&4_u32.to_be_bytes());
             buf[100..104].copy_from_slice(&length.to_be_bytes());
@@ -926,7 +995,7 @@ mod tests {
                 extension_type: 0x12345678,
                 data: vec![1, 2, 3],
             });
-            header.set_l1_table(512, 1).unwrap();
+            header.set_l1_table(1024, 1).unwrap();
             let serialized = header.serialize_to_buf().unwrap();
             let header = Qcow2Header::from_buf(&serialized).unwrap();
             assert_eq!(header.header_length(), length);
@@ -937,7 +1006,7 @@ mod tests {
                 );
             }
             assert_eq!(header.backing_filename().unwrap(), "base.qcow2");
-            assert_eq!(header.l1_table_offset(), 512);
+            assert_eq!(header.l1_table_offset(), 1024);
             assert!(
                 matches!(&header.extensions[0], Qcow2HeaderExtension::Unknown {
                 extension_type: 0x12345678,

@@ -31,6 +31,9 @@ impl RefTableEntry {
 impl TableEntry for RefTableEntry {
     fn try_from_plain(value: u64, qcow2_info: &Qcow2Info) -> Qcow2Result<Self> {
         let entry = RefTableEntry(value);
+        if entry.refblock_offset() >= 1_u64 << 56 {
+            return Err("Refcount block exceeds the supported host offset limit".into());
+        }
 
         if entry.reserved_bits() != 0 {
             return Err(format!(

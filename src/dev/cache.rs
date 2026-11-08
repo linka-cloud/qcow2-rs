@@ -112,34 +112,66 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         self.file.fsync(offset, len, flags).await
     }
 
-    async fn load_top_table<B: Table>(&self, top: &AsyncRwLock<B>, off: u64) -> Qcow2Result<usize> {
+    async fn load_top_table<B: Table>(
+        &self,
+        top: &AsyncRwLock<B>,
+        off: u64,
+        bytes: usize,
+        entries: usize,
+    ) -> Qcow2Result<usize> {
         let mut t = top.write().await;
 
         if t.is_update() {
             return Ok(0);
         }
 
+        if bytes != 0 {
+            let buf = unsafe { std::slice::from_raw_parts_mut(t.as_mut_ptr(), bytes) };
+            if self.call_read(off, buf).await? < entries * 8 {
+                return Err("Truncated qcow2 metadata table".into());
+            }
+        }
+        for index in 0..entries {
+            B::Entry::try_from_plain(t.get(index).into_plain(), &self.info)?;
+        }
+        // Bytes after the declared L1 entries are padding, not live entries.
+        for index in entries..t.entries() {
+            t.set(index, B::Entry::try_from_plain(0, &self.info)?);
+        }
         t.set_offset(Some(off));
-        let buf = unsafe { std::slice::from_raw_parts_mut(t.as_mut_ptr(), t.byte_size()) };
-        self.call_read(off, buf).await
+        Ok(bytes)
     }
 
     pub(crate) async fn load_refcount_table(&self) -> Qcow2Result<usize> {
         let h = self.header.read().await;
-        self.load_top_table(&self.reftable, h.reftable_offset())
+        let bytes = h.reftable_clusters() * self.info.cluster_size();
+        self.load_top_table(&self.reftable, h.reftable_offset(), bytes, bytes / 8)
             .await
     }
 
     pub(crate) async fn load_l1_table(&self) -> Qcow2Result<usize> {
         let h = self.header.read().await;
-        self.load_top_table(&self.l1table, h.l1_table_offset())
-            .await
+        let bytes = (h.l1_table_entries() * 8)
+            .align_up(1_usize << self.info.block_size_shift)
+            .unwrap();
+        self.load_top_table(
+            &self.l1table,
+            h.l1_table_offset(),
+            bytes,
+            h.l1_table_entries(),
+        )
+        .await
     }
 
     pub(crate) async fn get_l1_entry(&self, split: &SplitGuestOffset) -> Qcow2Result<L1Entry> {
         let l1_index = split.l1_index(&self.info);
 
-        Ok(self.l1table.read().await.get(l1_index))
+        let table = self.l1table.read().await;
+        if table.in_bounds(l1_index) {
+            Ok(table.get(l1_index))
+        } else {
+            L1Entry::try_from_plain(0, &self.info)
+        }
     }
 
     #[inline]
@@ -217,6 +249,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     ) -> Qcow2Result<()> {
         let info = &self.info;
         let tv = &v;
+        let zero_cluster = zeroed_io_buf(info.cluster_size());
         let mut f_vec = Vec::new();
 
         // Track 'new' clusters used in refcount/map table slice, any one
@@ -237,6 +270,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         // from in-flight during discarding new cluster.
         //
         let mut cache_vec = Vec::new();
+        let mut dirty_entries = Vec::new();
 
         log::info!("flush caches: count {}", v.len());
 
@@ -250,7 +284,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
                     // clearing dirty now since cache update won't happen now,
                     // and dirty is only used for flushing cache.
-                    e.set_dirty(false);
+                    dirty_entries.push(e.clone());
 
                     match cache.get_offset() {
                         Some(cache_off) => {
@@ -272,10 +306,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                                         // mark it as discarded, so others can observe it after
                                         // grabbing write lock
                                         *locked_cls = true;
-                                        f_vec.push(self.call_fallocate(
+                                        f_vec.push(self.call_write(
                                             info.cluster_round_down(cache_off),
-                                            info.cluster_size(),
-                                            Qcow2OpsFlags::FALLOCATE_ZERO_RANGE,
+                                            &zero_cluster,
                                         ));
                                         slot.insert(locked_cls);
                                     }
@@ -292,7 +325,16 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             }
         }
 
-        futures::future::join_all(f_vec).await;
+        if let Some(err) = futures::future::join_all(f_vec)
+            .await
+            .into_iter()
+            .find_map(Result::err)
+        {
+            for lock in cluster_map.values_mut() {
+                **lock = false;
+            }
+            return Err(err);
+        }
 
         {
             let mut cls_map = self.new_cluster.write().await;
@@ -321,6 +363,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 eprintln!("cache slice write failed {r:?}\n");
                 return r;
             }
+        }
+        for entry in dirty_entries {
+            entry.set_dirty(false);
         }
 
         //each cache's read lock drops here

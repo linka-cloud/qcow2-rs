@@ -160,12 +160,15 @@ Address these before advertising broader feature support:
 - [x] Parse v2 headers using their 72-byte layout and implied defaults; serialize
       them using the correct layout. The current parser reads a v3 structure
       even for v2 images.
-- [ ] Accept only supported format versions and validate header lengths,
+- [x] Accept only supported format versions and validate header lengths,
       refcount orders, offsets, sizes, extension bounds, and reserved fields
       before using them. Return errors rather than panicking on malformed input.
-      Version/header-length/refcount-order checks and extension record sizes,
-      duplicates, end markers, padding, and backing-name bounds are implemented;
-      broader table/address validation remains.
+      Enforce supported table/virtual-size limits, table range/alignment and
+      overlap checks, flag prerequisites, extension bounds, and reserved bits
+      when loading L1/L2/refcount entries. Reject truncated metadata and invalid
+      cached slices on every attempt. Load only declared L1 entries and zero
+      padding before it can become active. Exact reference reconciliation and
+      optional-metadata overlap traversal remain Phase 2 checker work.
 - [x] Preserve unknown additional header fields when rewriting the header.
       Unknown extensions are already retained as opaque data; extend this
       preservation to unknown header bytes.

@@ -86,8 +86,7 @@ async fn invalid_block_and_cache_geometry_returns_errors() {
     // A valid block size can still be too large for the image's clusters.
     let mut bytes = before.clone();
     bytes[20..24].copy_from_slice(&9_u32.to_be_bytes());
-    bytes[40..48].fill(0);
-    bytes[48..56].fill(0);
+    bytes[36..40].copy_from_slice(&32_u32.to_be_bytes());
     let header = qcow2_rs::meta::Qcow2Header::from_buf(&bytes).unwrap();
     let params = Qcow2DevParams::new(12, None, None, false, false);
     assert!(qcow2_rs::dev::Qcow2Info::new(&header, &params).is_err());

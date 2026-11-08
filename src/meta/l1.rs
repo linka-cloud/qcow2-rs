@@ -41,7 +41,7 @@ impl L1Entry {
     }
 
     pub fn reserved_bits(&self) -> u64 {
-        self.0 & 0x7f00_0000_0000_01feu64
+        self.0 & 0x7f00_0000_0000_01ffu64
     }
 }
 

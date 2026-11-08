@@ -44,9 +44,13 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
         // check if the current index is in bound of header l1 entries
         if !l1_table.in_bounds(l1_index) {
-            if l1_index >= l1_table.entries() {
+            if l1_index >= l1_table.entries() || l1_table.get_offset() == Some(0) {
                 let old_l1_offset = l1_table.get_offset().unwrap();
-                let old_l1_clusters = l1_table.cluster_count(info);
+                let old_l1_clusters = if old_l1_offset == 0 {
+                    0
+                } else {
+                    l1_table.cluster_count(info)
+                };
 
                 let mut new_l1_table = l1_table.clone_and_grow(l1_index, info.cluster_size());
                 let new_l1_clusters = new_l1_table.cluster_count(info);

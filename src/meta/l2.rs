@@ -292,6 +292,20 @@ impl TableEntry for L2Entry {
     fn try_from_plain(value: u64, qcow2_info: &Qcow2Info) -> Qcow2Result<Self> {
         let entry = L2Entry(value);
 
+        if qcow2_info.is_v2() && !entry.is_compressed() && entry.is_zero() {
+            return Err("Zero-cluster flags are not valid in qcow2 v2".into());
+        }
+        if !entry.is_compressed() && entry.is_copied() && entry.cluster_offset() == 0 {
+            return Err("qcow2 L2 copied flag requires a data allocation".into());
+        }
+        if entry.is_compressed() {
+            let bits = 62 - (qcow2_info.cluster_bits() - 8);
+            let offset = entry.compressed_descriptor() & ((1_u64 << bits) - 1);
+            if offset >= 1_u64 << 56 {
+                return Err("qcow2 compressed offset has reserved bits set".into());
+            }
+        }
+
         if entry.reserved_bits() != 0 {
             return Err(format!(
                 "Invalid L2 entry 0x{:x}, reserved bits set (0x{:x})",

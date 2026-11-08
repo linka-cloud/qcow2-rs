@@ -180,20 +180,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         while count > 0 {
             let cls = HostCluster(host_cluster);
             let rt_e = self.get_reftable_entry(cls.rt_index(info)).await;
-
-            let rb_handle = match self.get_refblock(&cls, &rt_e).await {
-                Ok(handle) => handle,
-                Err(_) => {
-                    let next_cls = cls.rb_slice_host_end(info);
-                    if next_cls - host_cluster >= count as u64 {
-                        return Err("Fail to load refblock in freeing cluster".into());
-                    }
-                    let skip = next_cls - host_cluster;
-                    count -= skip as usize;
-                    host_cluster = next_cls;
-                    continue;
-                }
-            };
+            if rt_e.is_zero() {
+                return Err("Cannot free clusters without a refcount block".into());
+            }
+            let rb_handle = self.get_refblock(&cls, &rt_e).await?;
 
             let mut refblock = rb_handle.value().write().await;
             let end = cls.rb_slice_host_end(info);
@@ -210,7 +200,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 let cls = HostCluster(host_cluster);
                 let slice_idx = cls.rb_slice_index(info);
 
-                refblock.decrement(slice_idx).unwrap();
+                refblock.decrement(slice_idx)?;
+                rb_handle.set_dirty(true);
+                self.mark_need_flush(true);
                 if first_zero && refblock.get(slice_idx).is_zero() {
                     self.free_cluster_offset
                         .fetch_min(host_cluster, Ordering::Relaxed);
@@ -263,7 +255,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 let buf = unsafe {
                     std::slice::from_raw_parts_mut(slice.as_mut_ptr(), slice.byte_size())
                 };
-                self.call_read(off, buf).await?;
+                if self.call_read(off, buf).await? != buf.len() {
+                    slice.set_offset(None);
+                    return Err("Truncated qcow2 metadata slice".into());
+                }
+                for index in 0..slice.entries() {
+                    if let Err(err) = B::Entry::try_from_plain(slice.get(index).into_plain(), info)
+                    {
+                        slice.set_offset(None);
+                        return Err(err);
+                    }
+                }
                 log::trace!("add_cache_slice: load from disk");
             } else {
                 entry.set_dirty(true);

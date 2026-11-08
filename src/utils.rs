@@ -21,8 +21,8 @@ macro_rules! qcow2_default_params {
 /// 4K is usually enough for holding generic qcow2 header
 const DEF_HEADER_SIZE: usize = 4096;
 
-/// 64K is big enough to hold any kind of qcow2 header
-const MAX_HEADER_SIZE: usize = 65536;
+/// Header extensions may occupy the entire first cluster.
+const MAX_HEADER_SIZE: usize = Qcow2Header::MAX_CLUSTER_SIZE as usize;
 
 /// Allocate one qcow2 device and qcow2 header needs to be parsed
 /// for allocating the device.
@@ -31,11 +31,12 @@ pub fn qcow2_alloc_dev_sync<T: Qcow2IoOps>(
     io: T,
     params: &Qcow2DevParams,
 ) -> Qcow2Result<(Qcow2Dev<T>, Option<PathBuf>)> {
-    fn read_header(path: &Path, bytes: usize) -> Qcow2Result<Qcow2IoBuf<u8>> {
+    fn read_header(path: &Path, bytes: usize) -> Qcow2Result<Vec<u8>> {
         use std::io::Read;
-        let mut buf = Qcow2IoBuf::<u8>::new(bytes);
-        let mut file = std::fs::File::open(path).unwrap();
-        let _ = file.read(&mut buf).unwrap();
+        let mut buf = Vec::new();
+        std::fs::File::open(path)?
+            .take(bytes as u64)
+            .read_to_end(&mut buf)?;
         Ok(buf)
     }
 
@@ -59,10 +60,10 @@ pub async fn qcow2_alloc_dev<T: Qcow2IoOps>(
     io: T,
     params: &Qcow2DevParams,
 ) -> Qcow2Result<(Qcow2Dev<T>, Option<PathBuf>)> {
-    async fn read_header<T: Qcow2IoOps>(io: &T, bytes: usize) -> Qcow2Result<Qcow2IoBuf<u8>> {
+    async fn read_header<T: Qcow2IoOps>(io: &T, bytes: usize) -> Qcow2Result<Vec<u8>> {
         let mut buf = Qcow2IoBuf::<u8>::new(bytes);
-        let _ = io.read_to(0, &mut buf).await?;
-        Ok(buf)
+        let count = io.read_to(0, &mut buf).await?;
+        Ok(buf[..count].to_vec())
     }
     let buf = read_header(&io, DEF_HEADER_SIZE).await?;
     let header = match Qcow2Header::from_buf(&buf) {
