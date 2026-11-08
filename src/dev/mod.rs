@@ -13,6 +13,7 @@ mod advanced;
 mod alloc;
 mod cache;
 mod check;
+mod compression;
 mod discard;
 mod graph;
 mod info;

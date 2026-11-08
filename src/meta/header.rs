@@ -500,7 +500,12 @@ impl Qcow2Header {
         {
             return Err("External data conflicts with snapshots or raw data backing files".into());
         }
-        if header.raw.incompatible_features & !23 != 0 {
+        if header.raw.incompatible_features & 8 != 0
+            && (header.header_length() < 112 || header.compression_type() != 1)
+        {
+            return Err("Unsupported qcow2 compression type (expected Zstd)".into());
+        }
+        if header.raw.incompatible_features & !31 != 0 {
             let feats = (0..64)
                 .filter(|bit| header.raw.incompatible_features & (1u64 << bit) != 0)
                 .map(|bit| {

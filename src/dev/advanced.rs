@@ -6,6 +6,7 @@ use crate::meta::{L1Entry, L2Entry, Mapping, MappingSource, TableEntry};
 
 pub(crate) enum Mutation<'a> {
     Write(&'a [u8]),
+    Compressed(&'a [u8]),
     Zero,
     Discard,
 }
@@ -277,6 +278,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         let result = async {
             self.copy_active_l1().await?;
             let cs = self.info.cluster_size();
+            let packed = if let Mutation::Compressed(data) = action {
+                self.pack_compressed(data).await?
+            } else {
+                Vec::new()
+            };
             let mut guest = self.info.cluster_round_down(offset);
             while guest < end {
                 let from = offset.saturating_sub(guest) as usize;
@@ -325,14 +331,20 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     data.fill(0);
                     self.advanced_read_at(&mut data, guest).await?;
                     match action {
-                        Mutation::Write(buf) => {
+                        Mutation::Write(buf) | Mutation::Compressed(buf) => {
                             let at = (guest + from as u64 - offset) as usize;
                             data[from..to].copy_from_slice(&buf[at..at + to - from]);
                         }
                         Mutation::Zero => data[from..to].fill(0),
                         Mutation::Discard => unreachable!(),
                     }
-                    let host = if self.info.external_data() {
+                    let compressed = packed
+                        .get((guest.saturating_sub(offset) / cs as u64) as usize)
+                        .copied()
+                        .flatten();
+                    let host = if compressed.is_some() {
+                        0
+                    } else if self.info.external_data() {
                         self.data_file
                             .as_ref()
                             .ok_or_else(|| invalid("Missing external data file"))?
@@ -345,7 +357,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     } else {
                         self.allocate_object(&data).await?
                     };
-                    descriptor = (1 << 63) | host;
+                    descriptor = compressed.unwrap_or((1 << 63) | host);
                     if self.info.extended_l2() {
                         if entry.is_compressed() {
                             bitmap = u32::MAX as u64;
@@ -360,6 +372,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                                 bitmap &= !(1_u64 << i);
                                 bitmap |= 1_u64 << (i + 32);
                             }
+                        }
+                        if compressed.is_some() {
+                            bitmap = 0;
                         }
                     }
                 }

@@ -3,8 +3,6 @@ use crate::helpers::{IntAlignment, Qcow2IoBuf};
 use crate::meta::{L2Entry, Mapping, MappingSource, SplitGuestOffset};
 use crate::zero_buf;
 use async_recursion::async_recursion;
-use miniz_oxide::inflate::core::{decompress as inflate, DecompressorOxide};
-use miniz_oxide::inflate::TINFLStatus;
 
 use super::*;
 
@@ -115,27 +113,16 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         let compressed_data = &_compressed_data[pad..(pad + compressed_length)];
 
-        // inflate straight into `buf` when it covers the whole cluster,
-        // otherwise into a temporary cluster buffer and copy the wanted part
-        let mut whole_cluster =
-            (buf.len() != info.cluster_size()).then(|| vec![0; info.cluster_size()]);
-        let dst: &mut [u8] = match whole_cluster.as_deref_mut() {
-            Some(tmp) => tmp,
-            None => buf,
-        };
-
-        let mut dec_ox = DecompressorOxide::new();
-        let (status, _read, _written) = inflate(&mut dec_ox, compressed_data, dst, 0, 0);
-        if status != TINFLStatus::Done && status != TINFLStatus::HasMoreOutput {
-            return Err(format!(
-                "Failed to decompress cluster (host offset 0x{compressed_offset:x}+{compressed_length}): {status:?}"
-            )
-            .into());
-        }
-
-        if let Some(tmp) = whole_cluster {
-            buf.copy_from_slice(&tmp[off_in_cls..(off_in_cls + buf.len())]);
-        }
+        let data = super::compression::decode(
+            self.header.read().await.compression_type(),
+            compressed_data,
+            info.cluster_size(),
+        )?;
+        let end = off_in_cls
+            .checked_add(buf.len())
+            .filter(|n| *n <= data.len())
+            .ok_or("Compressed read exceeds cluster")?;
+        buf.copy_from_slice(&data[off_in_cls..end]);
 
         Ok(buf.len())
     }
