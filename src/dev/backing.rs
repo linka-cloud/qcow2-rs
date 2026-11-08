@@ -27,6 +27,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         guest: u64,
         valid: usize,
     ) -> Qcow2Result<Qcow2IoBuf<u8>> {
+        self.read_entry_cluster_mode(entry, bitmap, guest, valid, true)
+            .await
+    }
+    pub(crate) async fn read_entry_cluster_mode(
+        &self,
+        entry: L2Entry,
+        bitmap: u64,
+        guest: u64,
+        valid: usize,
+        backing_fallback: bool,
+    ) -> Qcow2Result<Qcow2IoBuf<u8>> {
         let cs = self.info.cluster_size();
         let mut data = Qcow2IoBuf::<u8>::new(cs);
         data.fill(0);
@@ -47,7 +58,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             .await?;
         } else if self.info.extended_l2() {
             let unit = cs / 32;
-            if (bitmap as u32 | (bitmap >> 32) as u32) != u32::MAX {
+            if backing_fallback && (bitmap as u32 | (bitmap >> 32) as u32) != u32::MAX {
                 self.read_backing_data(&mut data, guest).await?;
             }
             for i in 0..32 {
@@ -75,7 +86,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     .read_payload(entry.cluster_offset(), guest, valid)
                     .await?;
                 data[..valid].copy_from_slice(&bytes);
-            } else {
+            } else if backing_fallback {
                 self.read_backing_data(&mut data, guest).await?;
             }
         }

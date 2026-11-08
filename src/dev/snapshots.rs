@@ -19,6 +19,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         &self,
         snapshots: &[Snapshot],
     ) -> Qcow2Result<()> {
+        let offset = self.stage_snapshot_directory(snapshots).await?;
+        self.header
+            .write()
+            .await
+            .set_snapshot_table(offset, snapshots.len() as u32);
+        self.rebuild_refcounts().await
+    }
+    pub(crate) async fn stage_snapshot_directory(
+        &self,
+        snapshots: &[Snapshot],
+    ) -> Qcow2Result<u64> {
         let mut bytes = Vec::new();
         for s in snapshots {
             if s.id.len() > u16::MAX as usize || s.name.len() > u16::MAX as usize {
@@ -41,12 +52,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             bytes.extend(s.name.as_bytes());
             bytes.resize(bytes.len().div_ceil(8) * 8, 0);
         }
-        let offset = self.allocate_object(&bytes).await?;
-        self.header
-            .write()
-            .await
-            .set_snapshot_table(offset, snapshots.len() as u32);
-        self.rebuild_refcounts().await
+        self.allocate_object(&bytes).await
     }
 
     pub async fn create_snapshot(

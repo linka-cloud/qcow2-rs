@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 mod advanced;
 mod alloc;
+mod amend;
 mod backing;
 mod bitmaps;
 mod cache;
@@ -27,6 +28,7 @@ mod repair;
 mod snapshots;
 mod write;
 use self::alloc::HostCluster;
+pub use self::amend::AmendOptions;
 pub use self::backing::RebaseTarget;
 pub use self::bitmaps::BitmapInfo;
 pub use self::compression::CompressionType;
@@ -74,6 +76,7 @@ pub struct Qcow2Dev<T> {
     need_flush: AtomicBool,
     needs_repair: AtomicBool,
     reopen_required: AtomicBool,
+    transaction_floor: AtomicU64,
     flush_lock: AsyncMutex<()>,
 
     // Ordinary reads/writes share this lock. Discard takes it exclusively
@@ -178,6 +181,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             need_flush: AtomicBool::new(false),
             needs_repair: AtomicBool::new(needs_repair),
             reopen_required: AtomicBool::new(false),
+            transaction_floor: AtomicU64::new(0),
             flush_lock: AsyncMutex::new(()),
             io_lock: AsyncRwLock::new(()),
         };

@@ -796,6 +796,54 @@ impl Qcow2Header {
         self.raw.version
     }
 
+    pub(crate) fn amend_layout(
+        &mut self,
+        version: u32,
+        order: u8,
+        extended: bool,
+        codec: u8,
+        lazy: bool,
+    ) -> Qcow2Result<()> {
+        if !matches!(version, 2 | 3) || order > 6 {
+            return Err("Unsupported version/refcount width".into());
+        }
+        if extended && self.raw.cluster_bits < 14 {
+            return Err("Extended L2 requires clusters of at least 16 KiB".into());
+        }
+        if version == 2 {
+            if order != 4
+                || extended
+                || codec != 0
+                || lazy
+                || self.extension_data(0x23852875).is_some()
+                || self.raw.incompatible_features & 4 != 0
+            {
+                return Err("v2 cannot represent these image features".into());
+            }
+            if self.unknown_header_fields.iter().any(|b| *b != 0)
+                || self.raw.compatible_features & !1 != 0
+            {
+                return Err("Downgrade would lose unknown header fields/features".into());
+            }
+            self.raw.header_length = 72;
+            self.unknown_header_fields.clear();
+            self.raw.incompatible_features = 0;
+            self.raw.compatible_features = 0;
+            self.raw.autoclear_features = 0;
+        } else {
+            if self.raw.version == 2 {
+                self.raw.header_length = 112;
+                self.unknown_header_fields = vec![0; 7];
+            }
+            self.raw.compatible_features = (self.raw.compatible_features & !1) | u64::from(lazy);
+            self.raw.incompatible_features =
+                (self.raw.incompatible_features & !16) | if extended { 16 } else { 0 } | 1;
+        }
+        self.raw.version = version;
+        self.raw.refcount_order = order as u32;
+        self.set_compression_type(codec);
+        Ok(())
+    }
     pub(crate) fn set_backing(&mut self, name: Option<String>, format: Option<String>) {
         self.backing_filename = name;
         self.extensions

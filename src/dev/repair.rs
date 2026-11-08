@@ -99,7 +99,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     pub(crate) async fn rebuild_refcounts_state(&self, keep_dirty: bool) -> Qcow2Result<()> {
         let graph = self.graph().await?;
-        let start = graph.counts.keys().next_back().copied().unwrap_or(0) + 1;
+        let start = (graph.counts.keys().next_back().copied().unwrap_or(0) + 1)
+            .max(self.transaction_floor.load(Ordering::Acquire));
         let mut base = graph.counts;
         for c in graph.ref_metadata {
             base.remove(&c);
@@ -165,6 +166,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let flags = self.header.read().await.incompatible_features();
             self.store_feature_flags(flags & !3).await?;
             self.needs_repair.store(false, Ordering::Release);
+            self.transaction_floor.store(0, Ordering::Release);
         }
         Ok(())
     }
@@ -204,7 +206,11 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             *self.header.write().await = Qcow2Header::from_buf(&bytes)?;
             self.reload_metadata().await?;
         }
-        self.graph().await?; // Validate structure before making any changes.
+        let graph = self.graph().await?; // Validate structure before making any changes.
+        self.transaction_floor.store(
+            graph.counts.keys().next_back().copied().unwrap_or(0) + 1,
+            Ordering::Release,
+        );
         self.mark_image_dirty().await?;
         self.needs_repair.store(true, Ordering::Release);
         self.rebuild_refcounts().await

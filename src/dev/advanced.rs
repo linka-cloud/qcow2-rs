@@ -224,9 +224,14 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             return Err(invalid("Read-only image"));
         }
         self.flush_meta_locked().await?;
-        if self.graph().await?.counts != self.actual_refcounts().await? {
+        let graph = self.graph().await?;
+        if graph.counts != self.actual_refcounts().await? {
             return Err(invalid("Repair refcounts before modifying shared metadata"));
         }
+        self.transaction_floor.store(
+            graph.counts.keys().next_back().copied().unwrap_or(0) + 1,
+            Ordering::Release,
+        );
         self.prepare_writable().await?;
         self.mark_image_dirty().await
     }
