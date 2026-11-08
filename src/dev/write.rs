@@ -670,6 +670,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Write data in `buf` to the virtual `offset` of this qcow2 image
     pub async fn write_at(&self, buf: &[u8], offset: u64) -> Qcow2Result<()> {
+        let _io = self.io_lock.read().await;
         self.__write_at(buf, offset).await
     }
 }

@@ -94,13 +94,16 @@ Address these before advertising broader feature support:
 - [x] Implement autoclear handling before writes can invalidate unsupported
       metadata. Clear flags durably before the first write/discard, retain them
       for reads, and prevent mutation if invalidation fails.
-- [ ] Fix discard semantics with backing files: clearing an L2 mapping exposes
+- [x] Fix discard semantics with backing files: clearing an L2 mapping exposes
       backing data and does not guarantee zero reads. Document discard behavior
       accurately and keep explicit zero-write semantics separate.
-- [ ] Reclaim host extents only after their refcount reaches zero. Current
-      discard punches an extent without establishing exclusive ownership.
-- [ ] Review discard ordering, concurrent writes/allocation, and failure handling
+- [x] Reclaim host extents only after their refcount reaches zero. Discard leaves
+      shared host data untouched.
+- [x] Review discard ordering, concurrent writes/allocation, and failure handling
       so an extent cannot be reclaimed while still referenced or after reuse.
+      Serialize discard against reads/writes, persist mapping removal first,
+      and conservatively skip shared/compressed clusters. Failed operations can
+      leave allocated leaks for future repair instead of reclaiming live data.
 - [x] Parse v2 headers using their 72-byte layout and implied defaults; serialize
       them using the correct layout. The current parser reads a v3 structure
       even for v2 images.

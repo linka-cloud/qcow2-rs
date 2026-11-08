@@ -306,6 +306,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Read data to `buf` from the virtual `offset` of this qcow2 image
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Qcow2Result<usize> {
+        let _io = self.io_lock.read().await;
         self.__read_at(buf, offset).await
     }
 }

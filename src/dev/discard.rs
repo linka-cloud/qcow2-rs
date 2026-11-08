@@ -7,12 +7,10 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     ///
     /// For every fully-covered guest cluster in the range, the L2 mapping
     /// is cleared to "unallocated", the host cluster's refcount is
-    /// decremented via `free_clusters`, and the host file extent is
-    /// punched via `call_fallocate(FALLOCATE_ZERO_RANGE)`. After the call
-    /// returns, reads from the discarded range return zero (per qcow2
-    /// §"L2 table entry" — an L2 entry of 0 is the "unallocated" state,
-    /// which reads as zero) and the underlying host file shrinks on
-    /// filesystems that support hole-punching.
+    /// decremented, and the host file extent is punched only when no
+    /// references remain. An unallocated cluster reads from the backing
+    /// image when present, or as zero otherwise. Discard is advisory and
+    /// does not guarantee zero reads when a backing image is present.
     ///
     /// Partial-cluster head/tail ranges (guest_offset not aligned to
     /// cluster_size, or guest_offset+len not aligned) are silently
@@ -21,18 +19,22 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// wanting per-byte-precise behavior should issue a zero-write for
     /// the head/tail in addition to this call.
     ///
-    /// Compressed clusters are silently skipped: compressed clusters
-    /// can share host sectors with adjacent compressed clusters, so
+    /// Shared and compressed clusters are silently skipped. Releasing shared
+    /// clusters would also require updating surviving mappings' copied flags.
+    /// Compressed clusters can share host sectors with adjacent clusters, so
     /// punching the host extent risks corrupting a neighbor. The
     /// cluster stays referenced and subsequent reads still decompress
     /// correctly.
     ///
-    /// Already-unallocated and zero-flagged clusters are no-ops.
+    /// Already-unallocated clusters and zero entries without an allocation
+    /// are no-ops. Allocated zero entries can be released like ordinary data.
     ///
-    /// As with `write_at`, dirty meta (L2 slice + refcount block) is
-    /// left in cache; call `flush_meta()` (or rely on the next eviction)
-    /// to land the changes on disk.
+    /// Mapping removal is persisted before releasing references or punching
+    /// data. Reference-count updates may remain cached: call `flush_meta()`
+    /// to persist them. Interrupted operations can leave allocated leaks,
+    /// but must not reclaim a cluster still referenced by a durable mapping.
     pub async fn discard(&self, virtual_offset: u64, len: u64) -> Qcow2Result<()> {
+        let _io = self.io_lock.write().await;
         let info = &self.info;
         let cluster_size = info.cluster_size() as u64;
 
@@ -76,11 +78,9 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
     /// Discard a single guest cluster at `guest_offset` (cluster-aligned).
     ///
-    /// Returns `Ok(())` for every non-fatal case: already-unallocated,
-    /// zero-flagged, compressed, or L2-slice-absent ranges all silently
-    /// no-op. The only errors are propagated from `free_clusters` /
-    /// `call_fallocate` failures (genuine IO errors on the host file
-    /// or refcount metadata).
+    /// Already-unallocated, shared, compressed, and L2-slice-absent ranges
+    /// are no-ops. Invalid refcounts and metadata/data I/O failures are
+    /// returned before the affected allocation can be reclaimed.
     async fn __discard_one_cluster(&self, guest_offset: u64) -> Qcow2Result<()> {
         let info = &self.info;
         debug_assert_eq!(info.in_cluster_offset(guest_offset), 0);
@@ -109,12 +109,24 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             return Ok(());
         };
 
-        // Clear the L2 entry to all zeros (unallocated state, reads-as-zero).
+        match self.cluster_refcount(host_cluster).await? {
+            0 => return Err("Discard mapping points to an unallocated host cluster".into()),
+            1 => {}
+            _ => return Ok(()), // Advisory discard cannot disturb shared mappings.
+        }
+
+        // Clear the mapping first, while its reference count is still intact.
         let idx = split.l2_slice_index(info);
         l2_table.set(idx, L2Entry(0));
         l2_handle.set_dirty(true);
         self.mark_need_flush(true);
         drop(l2_table);
+
+        // A crash after freeing/punching must not leave an old mapping on
+        // disk pointing at reclaimed data. io_lock excludes ordinary I/O
+        // until the durable mapping removal and reclamation are complete.
+        self.flush_meta().await?;
+        self.call_fsync(0, 0, 0).await?;
 
         // Refcount-release the host cluster(s). For ordinary (non-
         // compressed) entries this is always a single cluster, but we
@@ -122,14 +134,14 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         // call sites in the COW path.
         self.free_clusters(host_cluster, host_count).await?;
 
-        // Punch the host file so the OS reclaims the bytes. The
-        // FALLOCATE_ZERO_RANGE flag asks for both hole-punch + reads-as-
-        // zero semantics. On filesystems that don't support either,
-        // call_fallocate falls back to writing zeros (see `call_fallocate`
-        // implementation), so the LBPRZ-equivalent contract still holds.
-        let punch_len = host_count * info.cluster_size();
-        self.call_fallocate(host_cluster, punch_len, Qcow2OpsFlags::FALLOCATE_ZERO_RANGE)
-            .await?;
+        // Standard entries cover one host cluster. A shared cluster must
+        // remain untouched for its surviving references. io_lock prevents
+        // allocation from reusing a freed cluster before punching finishes.
+        if self.cluster_refcount(host_cluster).await? == 0 {
+            let punch_len = host_count * info.cluster_size();
+            self.call_fallocate(host_cluster, punch_len, Qcow2OpsFlags::FALLOCATE_ZERO_RANGE)
+                .await?;
+        }
 
         Ok(())
     }

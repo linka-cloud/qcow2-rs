@@ -230,7 +230,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         Ok(res)
     }
 
-    async fn cluster_is_allocated(&self, host_cluster: u64) -> Qcow2Result<bool> {
+    pub(crate) async fn cluster_refcount(&self, host_cluster: u64) -> Qcow2Result<u64> {
         let cls = HostCluster(host_cluster);
         let rt_entry = {
             let rt_index = cls.rt_index(&self.info);
@@ -239,13 +239,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         };
 
         if rt_entry.is_zero() {
-            return Ok(false);
+            return Ok(0);
         }
 
         let rb_handle = self.get_refblock(&cls, &rt_entry).await?;
         let rb = rb_handle.value().read().await;
 
-        Ok(!rb.get(cls.rb_slice_index(&self.info)).is_zero())
+        Ok(rb.get(cls.rb_slice_index(&self.info)).into_plain())
+    }
+
+    async fn cluster_is_allocated(&self, host_cluster: u64) -> Qcow2Result<bool> {
+        Ok(self.cluster_refcount(host_cluster).await? != 0)
     }
 
     async fn check_cluster(&self, virt_off: u64, cluster: Option<u64>) -> Qcow2Result<()> {

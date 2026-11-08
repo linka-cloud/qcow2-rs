@@ -49,6 +49,11 @@ pub struct Qcow2Dev<T> {
     need_flush: AtomicBool,
     flush_lock: AsyncMutex<()>,
 
+    // Ordinary reads/writes share this lock. Discard takes it exclusively
+    // through mapping removal and reclamation, preventing stale I/O or reuse
+    // of a freed extent before its hole-punch completes.
+    io_lock: AsyncRwLock<()>,
+
     file: T,
     backing_file: Option<Box<Qcow2Dev<T>>>,
     pub info: Qcow2Info,
@@ -118,6 +123,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             new_cluster: AsyncRwLock::new(Default::default()),
             need_flush: AtomicBool::new(false),
             flush_lock: AsyncMutex::new(()),
+            io_lock: AsyncRwLock::new(()),
         };
 
         Ok(dev)
