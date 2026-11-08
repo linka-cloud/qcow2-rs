@@ -171,16 +171,16 @@ Address these before advertising broader feature support:
       preservation to unknown header bytes.
 - [x] Fix cache geometry for clusters smaller than the default 4 KiB slice,
       and validate cluster/block-size combinations explicitly.
-- [ ] Complete contiguous allocation handling, including the larger-allocation
+- [x] Complete contiguous allocation handling, including the larger-allocation
       TODO in refcount-table growth and the short-allocation FIXME in L1 growth.
       L1 clones now size storage in bytes, zero new entries, advertise the
       requested entry count, and mark every relocated block for writing.
       L1 relocation now requires an exact contiguous range, releases short
-      candidates, and retries the next refblock. Allocations spanning refblock
-      boundaries still need work. Refcount-table relocation now writes every
-      table block and a complete new refblock, persists dependencies before
-      publishing an aligned header, and releases the old table after dropping
-      its write lock. The larger-allocation TODO remains.
+      candidates, and retries the next refblock. Large exact allocations use a
+      fresh contiguous extent with refblocks placed outside it. Replacement
+      refcount tables can span multiple refblocks; their self-accounting layout
+      grows until it covers the table, all refblocks, and any reserved extent.
+      Existing 32 MiB L1 / 8 MiB refcount-table implementation limits remain.
 
 Acceptance: unsupported images fail before mutation; supported images preserve
 unmodified bytes and metadata across writes, discard, flush, and reopen.

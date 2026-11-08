@@ -82,47 +82,66 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         &self,
         reftable: &LockWriteGuard<RefTable>,
         grown_rt: &mut RefTable,
-    ) -> Qcow2Result<()> {
+        reserve_clusters: usize,
+    ) -> Qcow2Result<u64> {
         let info = &self.info;
-        let new_rt_clusters = grown_rt.cluster_count(info);
-        if new_rt_clusters > info.rb_entries() - 1 {
-            // 1 entry stays free so we can allocate this refblock by putting its refcount into
-            // itself
-            // TODO: Implement larger allocations
-            return Err(format!(
-                "The reftable needs to grow to {} bytes, but we can allocate only {} -- try \
-                     increasing the cluster size",
-                new_rt_clusters * info.cluster_size(),
-                (info.rb_entries() - 1) * info.cluster_size(),
-            )
-            .into());
-        }
-
-        // Allocate new reftable, put its refcounts in a completely new refblock
-        let old_rt_offset = reftable.get_offset().unwrap();
+        let old_entries = reftable.entries();
         let old_rt_clusters = reftable.cluster_count(info);
-
-        // Use the whole refblock: table references can span multiple slices.
-        let mut new_refblock = RefBlock::new(info.refcount_order(), info.cluster_size(), None);
-
-        let refblock_offset =
-            (reftable.entries() as u64) << (info.rb_index_shift + info.cluster_shift);
-        new_refblock.set_offset(Some(refblock_offset));
-        let rt_offset = refblock_offset + info.cluster_size() as u64;
-        grown_rt.set_offset(Some(rt_offset));
-
-        // Reference for the refblock
-        new_refblock.increment(0)?;
-        // References for the reftable
-        for i in 1..(new_rt_clusters + 1) {
-            new_refblock.increment(i)?;
+        // Lay out a contiguous table, its refblocks, then any requested extent
+        // beyond the old table's coverage. Iterate because the refblocks also
+        // need references and can require enlarging the replacement table.
+        let mut blocks = 1;
+        loop {
+            let total = grown_rt.cluster_count(info) + reserve_clusters + blocks;
+            let needed = total.div_ceil(info.rb_entries());
+            if needed != blocks {
+                blocks = needed;
+                continue;
+            }
+            let last_entry = old_entries
+                .checked_add(blocks - 1)
+                .ok_or("Refcount table size overflow")?;
+            if last_entry >= crate::meta::Qcow2Header::MAX_REFCOUNT_TABLE_SIZE as usize / 8 {
+                return Err("Refcount table exceeds the supported size limit".into());
+            }
+            if !grown_rt.in_bounds(last_entry) {
+                *grown_rt =
+                    reftable.clone_and_grow(last_entry, old_rt_clusters, info.cluster_size());
+                continue;
+            }
+            break;
         }
-
+        let new_rt_clusters = grown_rt.cluster_count(info);
+        let total = new_rt_clusters + blocks + reserve_clusters;
+        let rt_offset = (old_entries as u64)
+            .checked_mul(info.rb_entries() as u64)
+            .and_then(|n| n.checked_mul(info.cluster_size() as u64))
+            .ok_or("Refcount table offset overflow")?;
+        let end = rt_offset
+            .checked_add((total as u64) << info.cluster_bits())
+            .ok_or("Refcount allocation overflow")?;
+        if end > 1_u64 << 56 {
+            return Err("Refcount allocation exceeds the supported host offset limit".into());
+        }
+        let old_rt_offset = reftable.get_offset().unwrap();
+        grown_rt.set_offset(Some(rt_offset));
+        let mut refblocks = Vec::with_capacity(blocks);
+        for index in 0..blocks {
+            let offset = rt_offset + (((new_rt_clusters + index) as u64) << info.cluster_bits());
+            refblocks.push(RefBlock::new(
+                info.refcount_order(),
+                info.cluster_size(),
+                Some(offset),
+            ));
+            grown_rt.set_refblock_offset(old_entries + index, offset);
+        }
+        for index in 0..total {
+            refblocks[index / info.rb_entries()].increment(index % info.rb_entries())?;
+        }
         self.flush_refcount_table(reftable).await?;
-        self.flush_table(&new_refblock, 0, new_refblock.byte_size())
-            .await?;
-
-        grown_rt.set_refblock_offset(reftable.entries(), refblock_offset);
+        for block in &refblocks {
+            self.flush_table(block, 0, block.byte_size()).await?;
+        }
         self.flush_top_table(grown_rt).await?;
 
         // write header
@@ -140,7 +159,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             .await?;
         }
 
-        Ok(())
+        Ok(rt_offset + (((new_rt_clusters + blocks) as u64) << info.cluster_bits()))
     }
 
     async fn get_reftable_entry(&self, rt_idx: usize) -> RefTableEntry {
@@ -337,7 +356,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             let mut grown_rt = reftable.clone_and_grow(rt_index, rt_clusters, info.cluster_size());
             let old_offset = reftable.get_offset().unwrap();
             if !grown_rt.is_update() {
-                self.grow_reftable(&reftable, &mut grown_rt).await?;
+                self.grow_reftable(&reftable, &mut grown_rt, 0).await?;
             }
             let relocated = grown_rt.get_offset() != reftable.get_offset();
             *reftable = grown_rt;
@@ -550,11 +569,28 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
     /// Release partial candidates and search the next refblock instead.
     pub(crate) async fn allocate_clusters_exact(&self, count: usize) -> Qcow2Result<(u64, usize)> {
         let info = &self.info;
-        if count == 0 || count >= info.rb_entries() {
-            return Err(
-                "Contiguous allocation must fit in one refcount block with room for metadata"
-                    .into(),
-            );
+        if count == 0
+            || count
+                .checked_mul(info.cluster_size())
+                .map(|bytes| bytes > crate::meta::Qcow2Header::MAX_L1_SIZE as usize)
+                .unwrap_or(true)
+        {
+            return Err("Contiguous metadata allocation exceeds the supported size limit".into());
+        }
+        if count >= info.rb_entries() {
+            let mut table = self.reftable.write().await;
+            let old_offset = table.get_offset().unwrap();
+            let old_clusters = table.cluster_count(info);
+            let next_index = table.entries();
+            if next_index >= crate::meta::Qcow2Header::MAX_REFCOUNT_TABLE_SIZE as usize / 8 {
+                return Err("Refcount table exceeds the supported size limit".into());
+            }
+            let mut grown = table.clone_and_grow(next_index, old_clusters, info.cluster_size());
+            let offset = self.grow_reftable(&table, &mut grown, count).await?;
+            *table = grown;
+            drop(table);
+            self.free_clusters(old_offset, old_clusters).await?;
+            return Ok((offset, count));
         }
         let mut host_offset = self.free_cluster_offset.load(Ordering::Relaxed);
         loop {
@@ -676,10 +712,63 @@ mod tests {
         let image = make_temp_qcow2_img(1 << 20, 9, 6);
         let params = qcow2_default_params!(false, false);
         let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
-        for count in [0, dev.info.rb_entries(), usize::MAX] {
+        for count in [0, usize::MAX] {
             assert!(dev.allocate_clusters_exact(count).await.is_err());
         }
         assert!(!dev.need_flush_meta());
+    }
+
+    #[tokio::test]
+    async fn test_contiguous_allocation_spans_refblocks() {
+        for count in [64, 129, 4096] {
+            let image = make_temp_qcow2_img(1 << 20, 9, 6);
+            let params = qcow2_default_params!(false, false);
+            let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+            let (offset, allocated) = dev.allocate_clusters_exact(count).await.unwrap();
+            assert_eq!(allocated, count);
+            for cluster in 0..count {
+                assert_eq!(
+                    dev.cluster_refcount(offset + cluster as u64 * 512)
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+            dev.free_clusters(offset, count).await.unwrap();
+            dev.flush_meta().await.unwrap();
+            dev.fsync_range(0, 0).await.unwrap();
+            drop(dev);
+            let output = std::process::Command::new("qemu-img")
+                .args(["check", "-q"])
+                .arg(image.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reftable_itself_spans_multiple_refblocks() {
+        let image = make_temp_qcow2_img(1 << 20, 9, 6);
+        let params = qcow2_default_params!(false, false);
+        let dev = qcow2_setup_dev_tokio(image.path(), &params).await.unwrap();
+        let mut table = dev.reftable.write().await;
+        let old_offset = table.get_offset().unwrap();
+        let old_clusters = table.cluster_count(&dev.info);
+        let mut grown = table.clone_and_grow(65 * 64 - 1, old_clusters, 512);
+        dev.grow_reftable(&table, &mut grown, 0).await.unwrap();
+        *table = grown;
+        drop(table);
+        dev.free_clusters(old_offset, old_clusters).await.unwrap();
+        dev.flush_meta().await.unwrap();
+        dev.fsync_range(0, 0).await.unwrap();
+        drop(dev);
+        let output = std::process::Command::new("qemu-img")
+            .args(["check", "-q"])
+            .arg(image.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 
     #[tokio::test]
