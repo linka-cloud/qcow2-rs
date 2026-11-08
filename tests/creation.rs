@@ -180,3 +180,58 @@ async fn native_small_clusters_wide_refcounts_backing_and_luks() {
         assert!(out.status.success(), "{out:?}");
     }
 }
+
+#[tokio::test]
+async fn private_preallocated_payload_is_reused_but_snapshot_data_is_copied() {
+    for encrypted in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disk");
+        let mut options = CreateOptions {
+            size: 1 << 20,
+            extended_l2: true,
+            preallocation: Preallocation::Fallocate,
+            ..Default::default()
+        };
+        if encrypted {
+            options.set_luks_secret(b"secret");
+            options.luks.iterations = 1000;
+        }
+        create_qcow2(&path, &options).await.unwrap();
+        let mut params = options.open_params.clone();
+        if encrypted {
+            params.set_encryption_secret(b"secret");
+        }
+        let dev = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+        // Preallocated zero subclusters do not expose their physical address
+        // through get_mapping; inspect their on-disk descriptor instead.
+        let host = || {
+            let bytes = std::fs::read(&path).unwrap();
+            let l1 = u64::from_be_bytes(bytes[40..48].try_into().unwrap()) as usize;
+            let l2 = (u64::from_be_bytes(bytes[l1..l1 + 8].try_into().unwrap())
+                & 0x00ff_ffff_ffff_fe00) as usize;
+            u64::from_be_bytes(bytes[l2..l2 + 8].try_into().unwrap()) & 0x00ff_ffff_ffff_fe00
+        };
+        let before = host();
+        assert_ne!(before, 0);
+        let mut buf = Qcow2IoBuf::<u8>::new(512);
+        buf.fill(0xa7);
+        dev.write_at(&buf, 512).await.unwrap();
+        assert_eq!(host(), before);
+        dev.create_snapshot(
+            SnapshotOptions {
+                id: "saved".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+        buf.fill(0x63);
+        dev.write_at(&buf, 512).await.unwrap();
+        assert_ne!(host(), before);
+        dev.restore_snapshot("saved").await.unwrap();
+        dev.read_at(&mut buf, 512).await.unwrap();
+        assert!(buf.iter().all(|b| *b == 0xa7));
+        dev.check().await.unwrap();
+    }
+}

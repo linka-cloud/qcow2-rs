@@ -83,6 +83,15 @@ pub trait Qcow2IoOps {
 pub(crate) fn linux_reserve(fd: i32, offset: u64, len: usize) -> Qcow2Result<()> {
     let offset = i64::try_from(offset).map_err(|_| "Reservation offset overflow")?;
     let len = i64::try_from(len).map_err(|_| "Reservation length overflow")?;
-    nix::fcntl::fallocate(fd, nix::fcntl::FallocateFlags::empty(), offset, len)?;
+    if let Err(error) = nix::fcntl::fallocate(fd, nix::fcntl::FallocateFlags::empty(), offset, len)
+    {
+        if matches!(
+            error,
+            nix::errno::Errno::EOPNOTSUPP | nix::errno::Errno::ENOSYS
+        ) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, error).into());
+        }
+        return Err(error.into());
+    }
     Ok(())
 }

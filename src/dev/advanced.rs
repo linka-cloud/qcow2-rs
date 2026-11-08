@@ -356,6 +356,24 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                             )
                             .await?;
                         guest
+                    } else if !entry.is_compressed()
+                        && entry.cluster_offset() != 0
+                        && self.cluster_refcount(entry.cluster_offset()).await? == 1
+                    {
+                        // Keep a private preallocated extent. Shared/snapshot and
+                        // compressed storage must still use a fresh payload.
+                        let host = entry.cluster_offset();
+                        if self.info.encrypted() {
+                            self.crypto
+                                .read()
+                                .await
+                                .as_ref()
+                                .ok_or("Encryption is not initialized")?
+                                .apply(host, guest, &mut data, true)?;
+                        }
+                        self.write_bytes(host, &data).await?;
+                        self.call_fsync(0, 0, 0).await?;
+                        host
                     } else {
                         self.allocate_payload(&data, guest).await?
                     };
