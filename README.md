@@ -20,8 +20,11 @@ subclusters, external payload files, and precise zero writes
 - exact refcount checking and explicit repair, including dirty/lazy-refcount
 recovery, snapshots, and persistent bitmap storage
 
-- LUKS1 and legacy AES payload encryption, native LUKS creation, and persistent
-dirty bitmap management and change tracking
+- LUKS1 and legacy AES payload encryption, native LUKS creation/keyslot management,
+and persistent dirty bitmap management and change tracking
+
+- native v2/v3 creation, resize, snapshot-preserving rebase/commit, metadata
+conversion, capabilities, and configurable preallocation
 
 - l2 table & refcount block load & store in slice way, and the minimized
 slice size is block size, and the maximized size is cluster size
@@ -61,13 +64,13 @@ limits, validation results, and remaining work.
 
 | Feature | Read/write | Create/manage | Check/repair |
 | --- | --- | --- | --- |
-| Basic v2/v3 images, raw/QCOW2 backing | Yes | Basic v3 formatting | Yes |
+| Basic v2/v3 images, raw/QCOW2 backing | Yes | Native creation, resize, rebase, commit, amend | Yes |
 | Internal snapshots and VM state | Yes, shared-cluster COW | List/create/delete/restore; VM-state read | Yes |
-| Extended L2 subclusters | Yes, including compressed reads | Open QEMU-created images | Yes |
-| External data files, including raw mode | Yes | Open QEMU-created images; caller path override | Metadata refcounts |
-| Lazy refcounts | Yes, durable dirty-state tracking | Open existing images | Explicit recovery |
-| Deflate/Zstd compression | Strict reads; ordinary or compressed writes | Native codec selection on empty v3 images | Packed extent accounting |
-| LUKS1 encryption | AES-XTS/CBC, plain/plain64/ESSIV IVs | Native AES-256-XTS creation; existing keyslots preserved | Encryption storage accounted for |
+| Extended L2 subclusters | Yes, including compressed reads | Native creation and conversion | Yes |
+| External data files, including raw mode | Yes | Native creation, resize, rename/path override | Metadata refcounts; raw consistency recovery |
+| Lazy refcounts | Yes, durable dirty-state tracking | Create and amend | Explicit recovery |
+| Deflate/Zstd compression | Strict reads; ordinary or compressed writes | Native creation, empty-image selection, and metadata conversion | Packed extent accounting |
+| LUKS1 encryption | AES-XTS/CBC, plain/plain64/ESSIV IVs | Native v2/v3 AES-256-XTS creation; keyslot add/rotate/revoke | Encryption storage accounted for |
 | Legacy AES encryption | Compatibility reads/writes | No native creation default | No password verifier in this format |
 | Persistent bitmaps | Durable dirty tracking, including snapshot restore | List/create/clear/enable/disable/rename/merge/remove/export | Storage and consistency checked |
 
@@ -114,6 +117,80 @@ ordering and can increase latency and sparse-file growth. Ordinary images keep
 the existing cached write path. Flush excludes guest writes so lazy dirty state
 is cleared only after active writes and metadata are synchronized.
 
+## Creation and image management
+
+`create_qcow2(path, &CreateOptions).await?` creates new files without overwriting
+existing storage. Options select version, virtual size in bytes, cluster/refcount
+geometry, standard or extended L2, backing name/format, external payload/raw mode,
+codec, lazy refcounts, LUKS credentials/KDF parameters, and preallocation. Backing
+and data names resolve relative to the new metadata file. `open_params` supplies
+buffered initialization parameters and backing credentials; external path overrides
+are rejected during creation. Creation errors remove only files created by that call.
+
+`dev.capabilities().await` reports the detected layout, encryption, bitmap/snapshot
+presence, writable mode, recovery/reopen state, and supported operation flags.
+`dev.backing_file().await` returns the immediate backing declaration and detected
+format; `storage_paths().await?` enumerates the attached file-backed chain.
+
+Management APIs use the same serialized transaction path as advanced writes:
+
+- `resize(new_size, allow_shrink)` requires sector alignment and explicit shrink
+  permission. Growth reads as zeros even over a larger backing; shrink/regrow does
+  not reveal discarded bytes. Inactive snapshot sizes/data remain intact. Old v2
+  snapshots without disk-size records require conversion to v3 before resize.
+- `rebase(target, preserve_data)` accepts `Option<RebaseTarget<T>>`; `None` flattens.
+  Preserving mode materializes active and inactive roots before changing backing.
+  Non-preserving mode deliberately changes fallback contents and marks dirty maps.
+- `commit_to(&backing_dev, empty_source)` and
+  `commit_to_raw(&raw_io, path, empty_source)` copy into the immediate writable base,
+  preserve its trailing bytes, and optionally empty the active overlay. Both source
+  and destination snapshots remain intact. Partial failures can leave the base
+  partly updated while the materialized source retains the complete disk view.
+- `amend(AmendOptions)` converts v2/v3, all seven refcount widths, standard/extended
+  L2, codec tags, and lazy policy. It preserves snapshots, bitmap objects, and VM-state
+  bytes, relocating VM mappings where geometry changes. Compressed payloads become
+  ordinary clusters during conversion. Invalid downgrades fail explicitly, including
+  v2 with bitmaps/external data and one-bit refcounts with snapshots.
+- `amend_data_file_name(path)` records an external-file rename after reopening
+  with an override to the same storage. It does not move payload bytes.
+- `preallocate(Preallocation::{Off, Metadata, Fallocate, Full})` materializes the
+  active view. Metadata mode reserves mappings with sparse allocated-zero extents
+  where possible; nonzero/backing/encrypted data must be copied. Fallocate reserves
+  physical storage, using full initialization when the backend reports reservation
+  unsupported. Full writes every payload cluster. Private extents are reused by
+  subsequent writes; shared snapshots and metadata COW still need free space.
+
+Run management with exclusive ownership of the image and affected backing chain.
+Device locks serialize operations within these handles; separate processes or
+independently opened writers are not coordinated. Preserving rebase, commit, and
+metadata conversion can copy the complete disk and every snapshot, requiring
+substantial time and temporary space. They do not reclaim the sparse file's high
+water mark. A failed layout/backing publication can require closing and reopening
+before explicit repair; recovery flags and `capabilities` expose that requirement.
+A refcount repair cannot reconstruct lost payload bytes or a torn header.
+
+```sh
+rqcow2 format disk.qcow2 --version 3 --extended-l2 --preallocation metadata
+rqcow2 format overlay.qcow2 --backing base.raw --backing-format raw
+rqcow2 format external.qcow2 --data-file payload.raw --data-file-raw
+rqcow2 resize disk.qcow2 0x8000000
+rqcow2 resize disk.qcow2 0x4000000 --shrink
+rqcow2 preallocate disk.qcow2 falloc
+rqcow2 rebase overlay.qcow2 --backing replacement.qcow2 --backing-format qcow2
+rqcow2 commit overlay.qcow2
+rqcow2 amend disk.qcow2 --extended-l2 off --refcount-order 5 --compression zstd
+rqcow2 --external-data-file renamed.raw amend external.qcow2 --data-file-name renamed.raw
+rqcow2 --secret-file current.bin keyslot encrypted.qcow2 list
+rqcow2 --secret-file current.bin keyslot encrypted.qcow2 change 0 replacement.bin
+```
+
+CLI `format --size` retains MiB units; `resize` takes bytes and accepts hexadecimal.
+`--image-secret-file IMAGE=PASSWORD_FILE` can be repeated for distinct backing
+credentials. `--external-data-file` overrides only the opened root's payload path.
+Passphrase file bytes are used verbatim. Raw-to-QCOW2 conversion rounds virtual size
+to a cluster boundary and zero-pads the tail; QCOW2-to-raw preserves exact virtual
+length. Conversion rejects output aliases to source metadata, payload, or backing.
+
 ## Compression, encryption, and bitmaps
 
 `dev.set_compression_type(CompressionType::Zstd).await?` selects the codec before
@@ -128,7 +205,7 @@ with encrypted payloads and external data files.
 For encrypted opening, call `params.set_encryption_secret(password_bytes)`.
 `set_image_encryption_secret(path, password_bytes)?` supplies a distinct password
 for an image in a backing chain. Secret copies are zeroized on drop and redacted
-from parameter Debug output. For a new empty v3 image, call
+from parameter Debug output. For a new empty v2/v3 image, call
 `dev.initialize_luks(password_bytes, LuksOptions::default()).await?` before guest
 writes. Native creation uses AES-256-XTS, SHA-256, 4000 AF stripes, and 200,000
 PBKDF2 iterations. `LuksOptions` exposes the iteration count.
@@ -138,8 +215,13 @@ are supported, including plain, plain64, and supported ESSIV IVs. Keyslot KDF/AF
 hashes include SHA-1, SHA-224/256/384/512, and RIPEMD-160. Unsupported ciphers,
 LUKS versions, and IV/hash combinations return errors. Header/key material is
 limited to 32 MiB, AF stripes to 65,536, and PBKDF2 iterations to 10,000,000.
-The existing eight keyslots are preserved; keyslot/password amendment is not a
-native management interface. Legacy AES is provided for compatibility, has no
+Use `luks_keyslots`, `add_luks_keyslot`, `change_luks_keyslot`, and
+`remove_luks_keyslot` to inspect, add, rotate, and revoke credentials. Rotation
+publishes a replacement in a free slot before disabling the old slot, and returns
+the replacement slot index. Removal refuses the final active slot unless
+`allow_last` is explicit. Revocation disables the slot durably before scrubbing
+its key material; repair finishes interrupted scrubbing. This does not promise
+physical erasure from filesystem/storage snapshots or protect against torn sectors. Legacy AES is provided for compatibility, has no
 password verifier, and is not a creation default. Encryption covers payloads;
 QCOW2 metadata stays plaintext.
 

@@ -2,15 +2,17 @@
 
 Assessment date: 2026-11-08.
 
-Status: **Phases 1–4 implemented within the documented limits.** See the latest
-Phase 4 checkpoint below for interoperability, validation, supported encryption
-parameters, and remaining image-management work.
+Status: **Planned format and image-management implementation complete within the
+documented limits.** The final implementation checkpoint below supersedes earlier
+creation, keyslot, and management limitations. Non-Linux runtime validation and
+additional cipher families remain outside the supported implementation contract.
 
 ## Summary and evidence
 
 The initial assessment found core QCOW2 v3 disk I/O and gaps in safe feature
-admission. The implementation now covers Phases 1–4 within the limits documented
-below. Algorithm/size limits and additional image-management parity remain explicit.
+admission. The implementation now covers Phases 1–4, native advanced creation, public capability
+queries, keyslot management, and the image-management parity checklist below.
+Algorithm/size limits and the validation platform scope remain explicit.
 
 This plan is based on source and existing-test inspection, compared with the
 [QEMU QCOW2 specification](https://www.qemu.org/docs/master/interop/qcow2.html).
@@ -471,14 +473,12 @@ state rather than silently treated as valid.
 
 ## Public interfaces and documentation
 
-- [ ] Expose supported/detected capabilities and actionable unsupported-feature
+- [x] Expose supported/detected capabilities and actionable unsupported-feature
       errors; replace blanket incompatible-feature rejection incrementally as
       each feature becomes operational.
-- [ ] Extend open/create options for backing formats, external data files,
-      compression, encryption credentials, and format version. External-path and
-      secret options, native codec selection, and LUKS initialization are complete;
-      native formatting remains basic v3 (advanced layout creation/version
-      selection is still a separate interface task).
+- [x] Extend open/create options for backing formats, external data files,
+      compression, encryption credentials, and format version. `CreateOptions`,
+      `create_qcow2`, per-image secret inputs, and CLI flags cover these settings.
 - [x] Add snapshot, bitmap, explicit zero-write, and check/repair interfaces as
       their implementations land; extend the CLI for those capabilities.
 - [x] Document flush/durability requirements and failure behavior. Dirty cache
@@ -494,19 +494,22 @@ behavior during open.
 
 - [x] Restore dependency availability and run library/integration tests before
       treating the source assessment as a verified baseline.
-- [ ] Generate fixtures with QEMU for v2/v3, supported cluster sizes and all
+- [x] Generate fixtures with QEMU for v2/v3, supported cluster sizes and all
       refcount widths, backing chains, zero/preallocated clusters, compression,
       snapshots, extended L2, external data files, encryption, and bitmaps.
-- [ ] Compare guest bytes with QEMU after reads, partial/full writes, discard,
+- [x] Compare guest bytes with QEMU after reads, partial/full writes, discard,
       zeroing, flush, close, and reopen; verify untouched neighboring data.
-- [ ] Run `qemu-img check` on library-created and library-modified images and
+- [x] Run `qemu-img check` on library-created and library-modified images and
       compare checker outcomes on deliberately inconsistent fixtures.
-- [ ] Exercise valid feature combinations and rejection of invalid combinations.
-- [ ] Inject short I/O, write failures, allocation failures, flush failures, and
-      crashes at metadata publication boundaries; check recovery and leak safety.
-- [ ] Add regression tests for each Phase 1 issue, especially shared clusters,
+- [x] Exercise valid feature combinations and rejection of invalid combinations.
+- [x] Inject short I/O, write failures, allocation failures, flush failures, and
+      failures at metadata publication boundaries; check recovery and leak safety.
+      These model interruption, not physical power-loss or torn-sector testing.
+- [x] Add regression tests for each Phase 1 issue, especially shared clusters,
       backing-file discard, autoclear invalidation, and v2 header parsing.
-- [ ] Exercise concurrent I/O and the applicable backend/platform matrix.
+- [x] Exercise concurrent I/O and the Linux Tokio/synchronous/io_uring backend
+      matrix, including 4 KiB direct I/O. CI provisions Windows/i686 builds;
+      a new non-Linux runtime matrix was not executed locally.
 
 ## Final Phase 2/3 validation checkpoint
 
@@ -542,10 +545,94 @@ behavior during open.
 These operations are additional capabilities beyond implementing the on-disk
 format. Track them separately after the relevant format foundations exist:
 
-- [ ] Resize, including grow and safe shrink.
-- [ ] Rebase and commit backing chains.
-- [ ] Amend image options and convert supported metadata representations.
-- [ ] Configurable metadata/data preallocation.
+- [x] Resize, including grow and safe shrink.
+- [x] Rebase and commit backing chains.
+- [x] Amend image options and convert supported metadata representations.
+- [x] Configurable metadata/data preallocation.
 
-The existing resized-backing test invokes `qemu-img resize`; it does not provide
-a library resize implementation.
+Native APIs and CLI commands now implement all four items. Earlier checkpoints
+above remain historical evidence rather than the current capability summary.
+
+## Final implementation checkpoint
+
+Atomic implementation commits in this completion batch:
+
+| Commit | Change |
+| --- | --- |
+| `701e13f` | Native advanced v2/v3 creation, preallocation, and capability reporting |
+| `a190870` | Snapshot-safe growth/shrink and external-storage recovery |
+| `b6a9d79` | Reject hard-linked backing/external storage aliases |
+| `c615d6a` | Preserve snapshots during backing rebase and commit |
+| `8a8b54a` | Convert metadata versions, refcount widths, L2 layouts, and codec/lazy settings |
+| `59b0c64` | LUKS keyslot add/rotate/revoke, interrupted revocation recovery, and native v2 LUKS |
+| `26ece87` | Native CLI creation and all management commands, external overrides and per-image secrets |
+| `9086529` | Upgrade old v2 snapshot size records before allowing resize |
+| `095bb10` | Reuse private preallocated payloads and normalize unsupported reservation fallback |
+| `137b13c` | Direct io_uring management coverage and older-QEMU feature gates |
+| `df7faf5` | Require complete legacy test I/O, enabling all-target lint validation |
+| `b5aa239` | Initialize whole ordinary payload extents before partial writes; preserve initialization retry state |
+| `34201f4` | Conversion tail alignment, exact raw export length, and storage-alias rejection |
+
+Creation supports all seven refcount widths, small clusters, standard/extended L2,
+v2/v3, backing formats, raw/non-raw external payloads, lazy refcounts, codec choice,
+LUKS credentials, and off/metadata/falloc/full preallocation. It never overwrites
+existing storage. Custom backends may implement the new default `reserve` and
+`set_len` trait methods; unsupported reservation falls back to initialized data.
+File-backed setup compares physical identities, including hard links.
+
+Resize preserves inactive snapshots and VM state, resizes/marks bitmaps, masks
+larger backing files with zeros, and synchronizes external data lengths after
+metadata publication. Refcount repair restores raw external consistency after
+interrupted writes. Old v2 snapshots with inherited disk size must be upgraded
+before resize so their saved disk size cannot change implicitly.
+
+Preserving rebase materializes every root before changing backing. Commit similarly
+localizes the source's active/inactive roots before touching the immediate writable
+base, preserves destination snapshots and trailing bytes, refreshes the source's
+cached backing view, and optionally empties the active overlay. Non-preserving
+rebase and last-password removal are explicit API/CLI choices.
+
+Amend converts all roots and relocates VM state when L2 geometry changes, preserves
+opaque snapshot/bitmap fields, and rejects unsupported downgrades. Replacement
+refcount metadata is allocated beyond both the old and proposed reachable graph,
+protecting the old header's storage until publication. Failed layout/backing
+publication sets reopen-required state; in-place repair is refused until reopening.
+An external filename amendment verifies that the overridden file identifies the
+same storage before recording its new name.
+
+LUKS1 management supports all eight validated slots and existing supported AES
+cipher/hash modes. Rotation requires a free slot and publishes the new credential
+before revoking the old one. Revocation disables a slot durably before scrubbing
+its material; repair finishes interrupted scrubbing. This does not guarantee
+physical erasure from storage snapshots or resilience to torn sectors. Native
+creation remains AES-256-XTS/SHA-256; additional cipher families and LUKS2 are
+explicitly unsupported rather than silently misinterpreted.
+
+Operations remain serialized and can materialize complete disks/snapshots, consume
+temporary space, and grow sparse files. Preallocation does not eliminate metadata
+COW or shared-snapshot space needs. Management requires exclusive ownership of the
+image/affected chain across independently opened handles and processes. Supported
+limits remain 32 MiB L1/metadata objects, 8 MiB refcount tables, 2 MiB clusters,
+56-bit host offsets, and the previously documented crypto/bitmap bounds. There is
+no automatic persistence on drop, reconstruction of missing payload, or torn-header
+repair guarantee. See README for public APIs and CLI examples.
+
+Final validation for this checkpoint:
+
+- `cargo test --quiet`: **155 passed, 0 failed, 0 ignored**, across 27 test/doc-test
+  targets (including empty targets).
+- `cargo fmt --check` and `git diff --check`: passed.
+- `cargo clippy --all-targets --no-deps`: passed with warnings. Earlier fatal
+  unchecked-I/O lints in legacy test helpers are resolved.
+- Local QEMU **8.2.2** checks and guest comparisons pass for supported fixtures.
+  New tests cover native creation/preallocation across layouts, safe resize/rebase/
+  commit with snapshots and backing tails, every metadata refcount representation,
+  encrypted VM-state conversion, LUKS credential rotation/revocation and repair,
+  external rename, publication failures, private preallocation reuse, ordinary
+  payload-tail initialization, conversion boundaries, and physical storage aliases.
+- Linux buffered Tokio, synchronous I/O, and direct io_uring are exercised; the
+  new io_uring management regression uses 4 KiB direct I/O for standard/extended
+  metadata conversion, snapshot VM state, preallocation, and external resizing.
+- Non-Linux execution, physical power-loss/torn-sector testing, and a performance
+  qualification matrix were not run locally. These are validation limits, not
+  claims of additional implemented algorithms or recovery guarantees.
