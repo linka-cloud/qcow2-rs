@@ -6,6 +6,20 @@ use std::io::{Seek, SeekFrom, Write};
 use std::process::Command;
 
 #[tokio::test]
+async fn setup_returns_open_errors_instead_of_panicking() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.qcow2");
+    let params = Qcow2DevParams::new(9, None, None, true, false);
+    let err = qcow2_setup_dev_tokio(&missing, &params).await.unwrap_err();
+    assert_eq!(err.get_inner().kind(), std::io::ErrorKind::NotFound);
+    #[cfg(not(target_os = "windows"))]
+    assert!(qcow2_rs::utils::qcow2_setup_dev_sync(&missing, &params).is_err());
+    let image = make_temp_qcow2_img(1 << 20, 16, 4);
+    let direct = Qcow2DevParams::new(9, None, None, true, true);
+    assert!(qcow2_setup_dev_tokio(image.path(), &direct).await.is_err());
+}
+
+#[tokio::test]
 async fn encrypted_images_are_rejected_without_modification() {
     for method in [1_u32, 2, u32::MAX] {
         let image = make_temp_qcow2_img(1 << 20, 16, 4);

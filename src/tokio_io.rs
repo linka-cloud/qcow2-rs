@@ -23,47 +23,35 @@ pub struct Qcow2IoTokio {
 }
 
 impl Qcow2IoTokio {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub async fn new(path: &Path, ro: bool, dio: bool) -> Qcow2IoTokio {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!ro)
-            .open(path.to_path_buf())
+        Self::try_new(path, ro, dio)
             .await
-            .unwrap();
-
-        assert!(!dio);
-
-        let fd = file.as_raw_fd();
-        Qcow2IoTokio {
-            file: tokio::sync::Mutex::new(file),
-            fd,
-        }
+            .expect("open image failed")
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub async fn new(path: &Path, ro: bool, dio: bool) -> Qcow2IoTokio {
+    pub async fn try_new(path: &Path, ro: bool, dio: bool) -> Qcow2Result<Self> {
+        if dio {
+            return Err("Tokio backend does not support direct I/O".into());
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(!ro)
             .open(path.to_path_buf())
-            .await
-            .unwrap();
-
-        assert!(!dio);
-
-        Qcow2IoTokio {
+            .await?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let fd = file.as_raw_fd();
+        Ok(Qcow2IoTokio {
             file: tokio::sync::Mutex::new(file),
-        }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fd,
+        })
     }
 
     async fn write_at(&self, offset: u64, buf: &[u8]) -> Qcow2Result<()> {
         let mut file = self.file.lock().await;
 
         file.seek(SeekFrom::Start(offset)).await?;
-        let res = file.write(buf).await?;
-
-        assert!(res == buf.len());
+        file.write_all(buf).await?;
 
         Ok(())
     }

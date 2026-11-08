@@ -81,17 +81,22 @@ pub struct Qcow2IoUring {
 
 impl Qcow2IoUring {
     pub async fn new(path: &Path, ro: bool, dio: bool) -> Qcow2IoUring {
+        Self::try_new(path, ro, dio)
+            .await
+            .expect("open image failed")
+    }
+
+    pub async fn try_new(path: &Path, ro: bool, dio: bool) -> Qcow2Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(!ro)
             .open(path.to_path_buf())
-            .await
-            .unwrap();
+            .await?;
 
         if dio {
             crate::ops::set_direct_io(file.as_raw_fd());
         }
-        Qcow2IoUring { file }
+        Ok(Qcow2IoUring { file })
     }
 }
 
@@ -120,7 +125,8 @@ impl Qcow2IoOps for Qcow2IoUring {
 
         match res {
             Err(_) => Err("tokio-uring write failed".into()),
-            Ok(_) => Ok(()),
+            Ok(n) if n == buf.len() => Ok(()),
+            Ok(_) => Err("tokio-uring short write".into()),
         }
     }
 

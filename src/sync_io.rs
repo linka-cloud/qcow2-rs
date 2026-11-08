@@ -14,14 +14,18 @@ pub struct Qcow2IoSync {
 
 impl Qcow2IoSync {
     pub fn new(path: &Path, ro: bool, dio: bool) -> Qcow2IoSync {
-        let file = OpenOptions::new().read(true).write(!ro).open(path).unwrap();
+        Self::try_new(path, ro, dio).expect("open image failed")
+    }
+
+    pub fn try_new(path: &Path, ro: bool, dio: bool) -> Qcow2Result<Self> {
+        let file = OpenOptions::new().read(true).write(!ro).open(path)?;
         let fd = file.as_raw_fd();
 
         if dio {
             crate::ops::set_direct_io(fd);
         }
 
-        Qcow2IoSync { _file: file, fd }
+        Ok(Qcow2IoSync { _file: file, fd })
     }
 
     #[inline(always)]
@@ -65,12 +69,13 @@ impl Qcow2IoSync {
             Err("libc::pwrite failed".into())
         } else {
             if (res as usize) != buf.len() {
-                eprintln!(
-                    "short write: ask for {}, read {}, offset {:x}",
+                return Err(format!(
+                    "short write: ask for {}, wrote {}, offset {:x}",
                     buf.len(),
                     res,
                     offset
-                );
+                )
+                .into());
             }
             Ok(())
         }
