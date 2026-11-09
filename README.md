@@ -301,12 +301,9 @@ runner's preinstalled OpenSSL headers and static MSVC libraries.
 
 ## Test
 
-- for running the built-in test, `qemu-img` is required, so package of
-`qemu-utils`(Debian/Ubuntu) or `qemu-img`(Fedora, RHEL, ...) needs to
-be installed
-
-- built CI covers 'carget test' on both ubuntu and windows
-
+The integration tests require `qemu-img` and `qemu-io` on `PATH`. On Debian or
+Ubuntu, install `qemu-utils`. Windows CI installs the full QEMU package from MSYS2
+UCRT64, which provides both tools.
 
 ## Management validation
 

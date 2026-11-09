@@ -65,18 +65,21 @@ jobs:
     steps:
      - name: Checkout repository
        uses: actions/checkout@v5
-     # https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-qemu-image-util
+     # qemu-io is in the full package, which also pulls in qemu-img.
+     # https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-qemu
      - uses: msys2/setup-msys2@v2
        id: msys2
        with:
          msystem: UCRT64
          update: true
-         install: mingw-w64-ucrt-x86_64-qemu-image-util
+         install: mingw-w64-ucrt-x86_64-qemu
      - name: Add QEMU to the native Windows PATH
        run: '"${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
      - name: Verify modern QEMU fixture capabilities
        run: |
+        $PSNativeCommandUseErrorActionPreference = $true
         qemu-img --version
+        qemu-io --version
         python -c "import subprocess; h=subprocess.check_output(['qemu-img','create','-f','qcow2','-o','help'],text=True); assert all(x in h for x in ['extended_l2','data_file','compression_type','encrypt.format']),h"
      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
      - run: rustup component add clippy
@@ -100,10 +103,10 @@ jobs:
      - run: cargo clippy --all-targets --no-deps
      - name: Rust test(debug)
        run: |
-        cargo test -- --nocapture
+        cargo test --no-fail-fast -- --nocapture
      - name: Rust test(release)
        run: |
-        cargo test -r
+        cargo test --release --no-fail-fast
 
   test_macos:
     name: qcow2_rs macOS
