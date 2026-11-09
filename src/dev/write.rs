@@ -262,7 +262,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
 
         // someone may jump on this cluster at the same time,
         // just let _one_ of them to handle COW for compressed image
-        let data_mapping = match l2_table.get_mapping(info, &split).source {
+        let old_entry = l2_table.get_entry(info, &split);
+        let data_mapping = match old_entry.into_mapping(info, &split).source {
             MappingSource::Compressed | MappingSource::Backing => {
                 let mapping = self.alloc_and_map_cluster(&split, &mut l2_table).await?;
 
@@ -290,10 +291,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                 self.clear_new_cluster(allocated_cls >> info.cluster_bits())
                     .await;
 
-                l2_table.set(
-                    split.l2_slice_index(info),
-                    crate::meta::L2Entry::from_mapping(mapping.clone(), info.cluster_bits() as u32),
-                );
+                l2_table.set(split.l2_slice_index(info), old_entry);
 
                 Err(e)
             }
@@ -319,21 +317,8 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
                     // free clusters in original compressed mapping
                     // finally, this update needn't be flushed immediately,
                     // and can be update in ram
-                    let l2_e = crate::meta::L2Entry::from_mapping(
-                        mapping.clone(),
-                        info.cluster_bits() as u32,
-                    );
-                    match l2_e.compressed_range(info.cluster_bits() as u32) {
-                        Some((off, length)) => {
-                            let start = info.cluster_round_down(off);
-                            let end = info.cluster_round_down(off + (length as u64));
-
-                            let cnt = (((end - start) as usize) >> info.cluster_bits()) + 1;
-                            self.free_clusters(start, cnt).await?
-                        }
-                        None => {
-                            eprintln!("compressed clusters leak caused by wrong mapping")
-                        }
+                    if let Some((start, count)) = old_entry.allocation(info.cluster_bits() as u32) {
+                        self.free_clusters(start, count).await?;
                     }
                 }
 

@@ -176,3 +176,26 @@ async fn compressed_packing_respects_narrow_refcount_capacity() {
         assert!(out.status.success(), "order {order}: {out:?}");
     }
 }
+
+#[tokio::test]
+async fn overwriting_compressed_data_at_a_host_cluster_boundary_preserves_refcounts() {
+    const CLUSTER_SIZE: usize = 512;
+    let image = qcow2_rs::utils::make_temp_qcow2_img(1 << 20, 9, 4);
+    let p = Qcow2DevParams::new(9, None, None, false, false);
+    let dev = qcow2_setup_dev_tokio(image.path(), &p).await.unwrap();
+    let mut buf = Qcow2IoBuf::<u8>::new(CLUSTER_SIZE);
+    buf.fill(0x5a);
+    dev.write_compressed_at(&buf, 0).await.unwrap();
+    let mapping = dev.get_mapping(0).await.unwrap();
+    assert_eq!(mapping.cluster_offset.unwrap() % CLUSTER_SIZE as u64, 0);
+    assert_eq!(mapping.compressed_length, Some(CLUSTER_SIZE));
+    dev.check().await.unwrap();
+
+    buf.fill(0xa7);
+    dev.write_at(&buf, 0).await.unwrap();
+    dev.flush_meta().await.unwrap();
+    dev.check().await.unwrap();
+    buf.fill(0);
+    dev.read_at(&mut buf, 0).await.unwrap();
+    assert!(buf.iter().all(|&byte| byte == 0xa7));
+}
