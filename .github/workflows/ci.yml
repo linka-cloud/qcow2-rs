@@ -34,6 +34,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }} && rustup target add ${{ matrix.target }}
       - run: cargo build --verbose --target ${{ matrix.target }}
+      - name: Test large-file offsets on i686
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: cargo test --target i686-unknown-linux-gnu --test fallocate linux_backends_keep_large_file_offsets
   test_linux:
     name: qcow2_rs ubuntu
     runs-on: ubuntu-latest

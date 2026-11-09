@@ -9,13 +9,11 @@ impl Qcow2OpsFlags {
 }
 
 /// Map qcow2 fallocate flags to a host hole-punch and issue the
-/// (synchronous) `nix` fallocate syscall. Shared by every backend whose
+/// synchronous fallocate call. Shared by every backend whose
 /// underlying fd supports `FALLOC_FL_PUNCH_HOLE`; `tokio-uring` has no
 /// async fallocate of its own, so it also goes through this path.
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_punch_hole(fd: i32, offset: u64, len: usize, _flags: u32) -> Qcow2Result<()> {
-    use nix::fcntl::{fallocate, FallocateFlags};
-
     // PUNCH_HOLE deallocates the range (shrinking the host file's block
     // count) and makes it read back as zero, covering both the discard and
     // FALLOCATE_ZERO_RANGE contracts; it must be ORed with KEEP_SIZE so the
@@ -23,9 +21,34 @@ pub(crate) fn linux_punch_hole(fd: i32, offset: u64, len: usize, _flags: u32) ->
     // always issues F_PUNCHHOLE regardless of flags. Combining PUNCH_HOLE
     // with ZERO_RANGE is rejected by the kernel, and ZERO_RANGE alone does
     // not free blocks on every filesystem, so neither reclaims space.
-    let f = FallocateFlags::FALLOC_FL_PUNCH_HOLE | FallocateFlags::FALLOC_FL_KEEP_SIZE;
+    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    linux_fallocate(fd, mode, offset, len)?;
+    Ok(())
+}
 
-    fallocate(fd, f, offset as libc::off_t, len as libc::off_t)?;
+#[cfg(target_os = "linux")]
+fn linux_fallocate(fd: i32, mode: i32, offset: u64, len: usize) -> std::io::Result<()> {
+    #[cfg(not(all(target_env = "gnu", target_pointer_width = "32")))]
+    use libc::fallocate as fallocate_at;
+    #[cfg(all(target_env = "gnu", target_pointer_width = "32"))]
+    use libc::fallocate64 as fallocate_at;
+
+    // glibc's default off_t can be 32 bits on i686.
+    let offset = offset.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Allocation offset overflow",
+        )
+    })?;
+    let len = len.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Allocation length overflow",
+        )
+    })?;
+    if unsafe { fallocate_at(fd, mode, offset, len) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -81,17 +104,10 @@ pub trait Qcow2IoOps {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_reserve(fd: i32, offset: u64, len: usize) -> Qcow2Result<()> {
-    let offset = i64::try_from(offset).map_err(|_| "Reservation offset overflow")?;
-    let len = i64::try_from(len).map_err(|_| "Reservation length overflow")?;
-    if let Err(error) = nix::fcntl::fallocate(fd, nix::fcntl::FallocateFlags::empty(), offset, len)
-    {
-        if matches!(
-            error,
-            nix::errno::Errno::EOPNOTSUPP | nix::errno::Errno::ENOSYS
-        ) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, error).into());
+    match linux_fallocate(fd, 0, offset, len) {
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EOPNOTSUPP | libc::ENOSYS)) => {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, error).into())
         }
-        return Err(error.into());
+        result => result.map_err(Into::into),
     }
-    Ok(())
 }

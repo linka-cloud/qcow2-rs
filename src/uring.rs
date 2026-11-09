@@ -103,8 +103,13 @@ impl Qcow2IoUring {
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 impl Qcow2IoOps for Qcow2IoUring {
     async fn set_len(&self, len: u64) -> Qcow2Result<()> {
-        let size = i64::try_from(len).map_err(|_| "File length overflow")?;
-        if unsafe { libc::ftruncate(self.file.as_raw_fd(), size) } != 0 {
+        #[cfg(not(all(target_env = "gnu", target_pointer_width = "32")))]
+        use libc::ftruncate as truncate;
+        #[cfg(all(target_env = "gnu", target_pointer_width = "32"))]
+        use libc::ftruncate64 as truncate;
+
+        let size = len.try_into().map_err(|_| "File length overflow")?;
+        if unsafe { truncate(self.file.as_raw_fd(), size) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(())
@@ -144,7 +149,7 @@ impl Qcow2IoOps for Qcow2IoUring {
 
     async fn fallocate(&self, offset: u64, len: usize, flags: u32) -> Qcow2Result<()> {
         // tokio-uring (0.5) still has no async fallocate, so fall back to the
-        // shared synchronous nix fallocate() syscall on the raw fd.
+        // shared synchronous fallocate call on the raw fd.
         crate::ops::linux_punch_hole(self.file.as_raw_fd(), offset, len, flags)
     }
 

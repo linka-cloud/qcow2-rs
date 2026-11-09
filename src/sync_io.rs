@@ -3,12 +3,13 @@ use crate::ops::*;
 #[rustversion::before(1.75)]
 use async_trait::async_trait;
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 #[derive(Debug)]
 pub struct Qcow2IoSync {
-    _file: File,
+    file: File,
     fd: i32,
 }
 
@@ -25,67 +26,43 @@ impl Qcow2IoSync {
             crate::ops::set_direct_io(fd);
         }
 
-        Ok(Qcow2IoSync { _file: file, fd })
+        Ok(Qcow2IoSync { file, fd })
     }
 
     #[inline(always)]
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Qcow2Result<usize> {
-        let res = unsafe {
-            libc::pread(
-                self.fd,
-                buf.as_mut_ptr() as *mut libc::c_void,
+        let res = self.file.read_at(buf, offset)?;
+        if res != buf.len() {
+            eprintln!(
+                "short read: ask for {}, read {}, offset {:x}",
                 buf.len(),
-                offset as libc::off_t,
-            )
-        };
-
-        if res < 0 {
-            Err("libc::pread failed".into())
-        } else {
-            if (res as usize) != buf.len() {
-                eprintln!(
-                    "short read: ask for {}, read {}, offset {:x}",
-                    buf.len(),
-                    res,
-                    offset
-                );
-            }
-            Ok(res as usize)
+                res,
+                offset
+            );
         }
+        Ok(res)
     }
 
     #[inline(always)]
     async fn write_at(&self, offset: u64, buf: &[u8]) -> Qcow2Result<()> {
-        let res = unsafe {
-            libc::pwrite(
-                self.fd,
-                buf.as_ptr() as *const libc::c_void,
+        let res = self.file.write_at(buf, offset)?;
+        if res != buf.len() {
+            return Err(format!(
+                "short write: ask for {}, wrote {}, offset {:x}",
                 buf.len(),
-                offset as libc::off_t,
+                res,
+                offset
             )
-        };
-
-        if res < 0 {
-            Err("libc::pwrite failed".into())
-        } else {
-            if (res as usize) != buf.len() {
-                return Err(format!(
-                    "short write: ask for {}, wrote {}, offset {:x}",
-                    buf.len(),
-                    res,
-                    offset
-                )
-                .into());
-            }
-            Ok(())
+            .into());
         }
+        Ok(())
     }
 }
 
 #[rustversion::attr(before(1.75), async_trait(?Send))]
 impl Qcow2IoOps for Qcow2IoSync {
     async fn set_len(&self, len: u64) -> Qcow2Result<()> {
-        self._file.set_len(len)?;
+        self.file.set_len(len)?;
         Ok(())
     }
     #[cfg(target_os = "linux")]

@@ -114,6 +114,60 @@ fn fallocate_punch_hole_shrinks_st_blocks_on_linux() {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_backends_keep_large_file_offsets() {
+    use qcow2_rs::sync_io::Qcow2IoSync;
+    use qcow2_rs::uring::Qcow2IoUring;
+
+    const OFFSET: u64 = (1 << 32) + 4096;
+    const BLOCK: usize = 4096;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    tokio_uring::start(async {
+        let io = Qcow2IoUring::try_new(file.path(), false, false)
+            .await
+            .unwrap();
+        let sync = Qcow2IoSync::try_new(file.path(), false, false).unwrap();
+        io.set_len(OFFSET).await.unwrap();
+        assert_eq!(file.as_file().metadata().unwrap().len(), OFFSET);
+
+        let end = OFFSET + BLOCK as u64;
+        match io.reserve(OFFSET, BLOCK).await {
+            Ok(()) => assert_eq!(file.as_file().metadata().unwrap().len(), end),
+            Err(error) if error.get_inner().kind() == std::io::ErrorKind::Unsupported => {
+                io.set_len(end).await.unwrap();
+            }
+            Err(error) => panic!("large-offset reservation failed: {error}"),
+        }
+
+        let sentinel = [0x5a; BLOCK];
+        let payload = [0xa7; BLOCK];
+        let mut data = [0; BLOCK];
+        sync.write_from(4096, &sentinel).await.unwrap();
+        sync.write_from(OFFSET, &payload).await.unwrap();
+        assert_eq!(sync.read_to(OFFSET, &mut data).await.unwrap(), BLOCK);
+        assert_eq!(data, payload);
+        assert_eq!(io.read_to(OFFSET, &mut data).await.unwrap(), BLOCK);
+        assert_eq!(data, payload);
+
+        match io
+            .fallocate(OFFSET, BLOCK, Qcow2OpsFlags::FALLOCATE_ZERO_RANGE)
+            .await
+        {
+            Ok(()) => {
+                assert_eq!(io.read_to(OFFSET, &mut data).await.unwrap(), BLOCK);
+                assert_eq!(data, [0; BLOCK]);
+            }
+            Err(error) if error.get_inner().kind() == std::io::ErrorKind::Unsupported => {}
+            Err(error) => panic!("large-offset hole punch failed: {error}"),
+        }
+        assert_eq!(io.read_to(4096, &mut data).await.unwrap(), BLOCK);
+        assert_eq!(data, sentinel);
+        assert_eq!(file.as_file().metadata().unwrap().len(), end);
+    });
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn fallocate_punch_hole_shrinks_st_blocks_on_macos() {
