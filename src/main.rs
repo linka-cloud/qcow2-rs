@@ -376,10 +376,9 @@ fn dump_l1_table(
                 let e = l2.get(j);
 
                 let ol = match e.is_compressed() {
-                    true => match e.compressed_range(info.cluster_bits().try_into().unwrap()) {
-                        Some(v) => v,
-                        _ => (u64::MAX, 0),
-                    },
+                    true => e
+                        .compressed_range(info.cluster_bits().try_into().unwrap())
+                        .unwrap_or((u64::MAX, 0)),
                     false => (e.cluster_offset(), info.cluster_size()),
                 };
 

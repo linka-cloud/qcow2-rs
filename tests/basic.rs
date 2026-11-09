@@ -4,7 +4,7 @@ mod common;
 mod integretion {
     use crate::common::*;
     use crypto_hash::{hex_digest, Algorithm};
-    use hex;
+
     use qcow2_rs::dev::*;
     use qcow2_rs::helpers::Qcow2IoBuf;
     use qcow2_rs::qcow2_default_params;
@@ -210,7 +210,7 @@ mod integretion {
             let start = Instant::now();
             //write concurrently
             for off in (0..size).step_by(bsize as usize) {
-                f_vec.push(dev.write_at(&buf, off as u64));
+                f_vec.push(dev.write_at(&buf, off));
             }
             futures::future::join_all(f_vec).await;
             let duration = start.elapsed();
@@ -338,7 +338,7 @@ mod integretion {
             let img_file = make_temp_qcow2_img(size, cluster_bits, 4);
             let path = PathBuf::from(img_file.path());
             let params = qcow2_default_params!(false, false);
-            let dev = std::sync::Arc::new(qcow2_setup_dev_tokio(&path, &params).await.unwrap());
+            let dev = std::rc::Rc::new(qcow2_setup_dev_tokio(&path, &params).await.unwrap());
             let mut fv = Vec::new();
             let blocks = size >> params.get_bs_bits();
             let bs = 1 << params.get_bs_bits();
@@ -397,7 +397,7 @@ mod integretion {
             let path_str = qcow2_img.path().to_str().unwrap();
 
             let extra = 16_u64 << 20;
-            let para = format!("qemu-img resize {} +{}", &path_str, extra);
+            let para = format!("qemu-img resize {} +{}", path_str, extra);
             run_shell_cmd(&para);
 
             // read from resized device backing by external image

@@ -97,7 +97,7 @@ pub struct Qcow2Dev<T> {
 
 impl<T> std::fmt::Debug for Qcow2Dev<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = write!(f, "Image path {:?}\ninfo {:?}\n", &self.path, &self.info);
+        let _ = write!(f, "Image path {:?}\ninfo {:?}\n", self.path, self.info);
         let _ = match &self.backing_file {
             Some(Backing::Qcow2(b)) => write!(f, "backing {b:?}"),
             Some(Backing::Raw { size, .. }) => {
@@ -287,7 +287,7 @@ mod tests {
         rt.block_on(async move {
             let size = 64_u64 << 20;
             let img_file = make_temp_qcow2_img(size, 16, 4);
-            let io = Qcow2IoTokio::new(&img_file.path().to_path_buf(), true, false).await;
+            let io = Qcow2IoTokio::new(img_file.path(), true, false).await;
             let mut buf = Qcow2IoBuf::<u8>::new(4096);
             let _ = io.read_to(0, &mut buf).await;
             let header = Qcow2Header::from_buf(&buf).unwrap();

@@ -158,7 +158,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             buf.len(),
             virt_off,
             may_cow,
-            &mapping,
+            mapping,
         );
 
         let f_write = self.call_write(host_off + off_in_cls as u64, buf);
@@ -247,7 +247,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             "do_write_cow off_in_cls {:x} len {} mapping {}",
             off,
             buf.len(),
-            &mapping,
+            mapping,
         );
 
         // compressed image does have l1 ready, but backing dev may not
@@ -570,7 +570,7 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
             "do_write: offset {:x} len {} mapping {}",
             off,
             buf.len(),
-            &mapping,
+            mapping,
         );
 
         match mapping.source {

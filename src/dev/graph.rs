@@ -399,14 +399,17 @@ impl<T: Qcow2IoOps> Qcow2Dev<T> {
         }
         let graph = self.graph().await?;
         let actual = self.actual_refcounts().await?;
-        let mut report = CheckReport::default();
-        report.inconsistent_bitmaps = self
+        let inconsistent_bitmaps = self
             .load_bitmaps()
             .await?
             .into_iter()
             .filter(|m| !m.info.consistent)
             .map(|m| m.info.name)
             .collect();
+        let mut report = CheckReport {
+            inconsistent_bitmaps,
+            ..Default::default()
+        };
         for c in graph
             .counts
             .keys()

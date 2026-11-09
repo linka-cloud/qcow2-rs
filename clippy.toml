@@ -1,0 +1,2 @@
+# Keep lint suggestions compatible with the current dependency graph.
+msrv = "1.85"

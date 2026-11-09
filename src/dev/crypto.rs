@@ -355,12 +355,11 @@ fn unlock_luks(data: &[u8], password: &[u8]) -> Qcow2Result<PayloadCipher> {
     // Validate algorithms even if no active keyslot matches the credential.
     PayloadCipher::new(Secret::new(&vec![0; key_len]), cipher, mode, false)?;
     let ranges = luks_keyslot_ranges(data)?;
-    for i in 0..8 {
+    for (i, &(start, end)) in ranges.iter().enumerate() {
         let p = 208 + i * 48;
         if u32_at(data, p) != 0x00ac71f3 {
             continue;
         }
-        let (start, end) = ranges[i];
         let key = derive(
             password,
             &data[p + 8..p + 40],

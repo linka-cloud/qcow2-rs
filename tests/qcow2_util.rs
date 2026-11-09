@@ -28,7 +28,7 @@ mod integretion {
 
         let para = format!(
             "{} convert -f raw -O qcow2 -o {} {}",
-            &exe_path, &qcow2_p, &raw_p
+            exe_path, qcow2_p, raw_p
         );
         run_shell_cmd(&para);
         let qcow2_sum = calculate_qcow2_data_md5(&qcow2_f, 0, size).await;
@@ -36,7 +36,7 @@ mod integretion {
 
         let para = format!(
             "{} convert -f qcow2 -O raw -o {} {}",
-            &exe_path, &raw_p2, &qcow2_p
+            exe_path, raw_p2, qcow2_p
         );
         run_shell_cmd(&para);
         let raw_sum2 = {
@@ -52,9 +52,9 @@ mod integretion {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             let exe_path = if cfg!(debug_assertions) {
-                format!("target/debug/rqcow2")
+                "target/debug/rqcow2".to_string()
             } else {
-                format!("target/release/rqcow2")
+                "target/release/rqcow2".to_string()
             };
             __test_qcow2_utility_convert(exe_path).await;
         });

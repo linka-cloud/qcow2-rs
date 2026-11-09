@@ -15,7 +15,7 @@ pub fn run_shell_cmd(p: &str) {
     //println!("Run shell command {}", p);
     let pp = p.to_string();
     let tokens: Vec<&str> = pp.split(' ').collect();
-    let output = Command::new(&tokens[0])
+    let output = Command::new(tokens[0])
         .args(&tokens[1..])
         .output()
         .expect("Failed to execute process");
@@ -63,10 +63,7 @@ pub fn make_rand_qcow2_img(
     let in_path = tmp_inp.path().to_str().unwrap();
     let out_path = tmp_outp.path().to_str().unwrap();
 
-    let para = format!(
-        "qemu-img convert -f raw -O qcow2 {} {}",
-        &in_path, &out_path
-    );
+    let para = format!("qemu-img convert -f raw -O qcow2 {} {}", in_path, out_path);
     run_shell_cmd(&para);
 
     (tmp_inp, tmp_outp)
@@ -97,7 +94,7 @@ pub fn make_compressed_qcow2_img(
 
     let para = format!(
         "qemu-img convert -c -f raw -O qcow2 {} {}",
-        &in_path, &out_path
+        in_path, out_path
     );
     run_shell_cmd(&para);
 
@@ -116,7 +113,7 @@ pub fn make_backing_qcow2_img(backing: &tempfile::NamedTempFile) -> tempfile::Na
 
     let cmd = format!(
         "qemu-img create -f qcow2 -F qcow2 -b {} {}",
-        &in_path, out_path
+        in_path, out_path
     );
     run_shell_cmd(&cmd);
 
@@ -149,7 +146,7 @@ pub async fn test_qcow2_dev_write_verify<T: Qcow2IoOps + 'static>(
     for (off, len) in input {
         let d = dev.clone();
         fv.push(local.spawn_local(async move {
-            let mut wbuf = Qcow2IoBuf::<u8>::new(len as usize);
+            let mut wbuf = Qcow2IoBuf::<u8>::new(len);
 
             let mut rng = rand::thread_rng();
             rng.fill(&mut wbuf[..]);
@@ -158,7 +155,7 @@ pub async fn test_qcow2_dev_write_verify<T: Qcow2IoOps + 'static>(
             d.write_at(&wbuf, off).await.unwrap();
             println!("write at {:x}/{}..done", off, len);
 
-            let mut rbuf = Qcow2IoBuf::<u8>::new(len as usize);
+            let mut rbuf = Qcow2IoBuf::<u8>::new(len);
 
             d.read_at(&mut rbuf, off).await.unwrap();
 
@@ -199,17 +196,17 @@ pub async fn test_cow_write(
     let mut rng = rand::thread_rng();
     rng.fill(&mut buf[..]);
     let buf_md5 = hex_digest(Algorithm::MD5, &buf);
-    dev.write_at(&mut buf, off).await.unwrap();
+    dev.write_at(&buf, off).await.unwrap();
     dev.flush_meta().await.unwrap();
     dev.check().await.unwrap();
 
     //check if written data is correct
-    let qcow2_sum = calculate_qcow2_data_md5(&qcow2_img, off, buf_size as u64).await;
+    let qcow2_sum = calculate_qcow2_data_md5(qcow2_img, off, buf_size as u64).await;
     assert!(qcow2_sum == buf_md5);
 
     //check if the beginning data is read correctly
     let raw_sum = calculate_raw_md5(rawf.path().to_str().unwrap(), 0, off as usize);
-    let qcow2_sum = calculate_qcow2_data_md5(&qcow2_img, 0, off).await;
+    let qcow2_sum = calculate_qcow2_data_md5(qcow2_img, 0, off).await;
     assert!(qcow2_sum == raw_sum);
 
     //check if the tail data is read correctly
@@ -219,11 +216,6 @@ pub async fn test_cow_write(
         right_off,
         (size - right_off).try_into().unwrap(),
     );
-    let qcow2_sum = calculate_qcow2_data_md5(
-        &qcow2_img,
-        right_off,
-        (size - right_off).try_into().unwrap(),
-    )
-    .await;
+    let qcow2_sum = calculate_qcow2_data_md5(qcow2_img, right_off, size - right_off).await;
     assert!(qcow2_sum == raw_sum);
 }
