@@ -128,7 +128,6 @@ fn linux_backends_keep_large_file_offsets() {
         let io = Qcow2IoUring::try_new(file.path(), false, false)
             .await
             .unwrap();
-        let sync = Qcow2IoSync::try_new(file.path(), false, false).unwrap();
         io.set_len(OFFSET).await.unwrap();
         assert_eq!(file.as_file().metadata().unwrap().len(), OFFSET);
 
@@ -141,6 +140,8 @@ fn linux_backends_keep_large_file_offsets() {
             Err(error) => panic!("large-offset reservation failed: {error}"),
         }
 
+        drop(io);
+        let sync = Qcow2IoSync::try_new(file.path(), false, false).unwrap();
         let sentinel = [0x5a; BLOCK];
         let payload = [0xa7; BLOCK];
         let mut data = [0; BLOCK];
@@ -148,6 +149,10 @@ fn linux_backends_keep_large_file_offsets() {
         sync.write_from(OFFSET, &payload).await.unwrap();
         assert_eq!(sync.read_to(OFFSET, &mut data).await.unwrap(), BLOCK);
         assert_eq!(data, payload);
+        drop(sync);
+        let io = Qcow2IoUring::try_new(file.path(), false, false)
+            .await
+            .unwrap();
         assert_eq!(io.read_to(OFFSET, &mut data).await.unwrap(), BLOCK);
         assert_eq!(data, payload);
 

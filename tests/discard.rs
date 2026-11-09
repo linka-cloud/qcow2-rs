@@ -133,6 +133,7 @@ mod discard {
             // discard's user-visible behavior, and it holds on both
             // the punch path and the zero-write fallback path.
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -166,6 +167,7 @@ mod discard {
                 "post-discard read must return zeros (L2 entry of 0 reads as zero)",
             );
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -205,6 +207,7 @@ mod discard {
             dev.read_at(&mut buf, 0).await.unwrap();
             assert!(buf.iter().all(|&b| b == 0xEE));
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -248,6 +251,7 @@ mod discard {
             // See T1 comment about the Linux strict-shrinkage assertion —
             // dropped here for the same reason.
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -284,6 +288,7 @@ mod discard {
             dev.read_at(&mut rb, 0).await.unwrap();
             assert!(rb.iter().all(|&b| b == 0));
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -316,6 +321,7 @@ mod discard {
                 "after discard+rewrite the new pattern must be readable",
             );
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }
@@ -370,6 +376,7 @@ mod discard {
                 .unwrap();
             assert!(rb.iter().all(|&b| b == 0xA4));
 
+            drop(dev);
             qemu_img_check_or_skip(&path);
         });
     }

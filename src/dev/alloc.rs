@@ -843,7 +843,8 @@ mod tests {
             let res = dev.allocate_clusters(to_alloc).await.unwrap().unwrap();
             dev.flush_meta().await.unwrap();
 
-            let dev2 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+            let read_params = qcow2_default_params!(true, false);
+            let dev2 = qcow2_setup_dev_tokio(&path, &read_params).await.unwrap();
             let curr = dev2.count_alloc_clusters().await.unwrap();
 
             // count and see if anything is expected
@@ -853,7 +854,7 @@ mod tests {
             dev.free_clusters(res.0, res.1).await.unwrap();
             dev.flush_meta().await.unwrap();
 
-            let dev3 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+            let dev3 = qcow2_setup_dev_tokio(&path, &read_params).await.unwrap();
             let curr = dev3.count_alloc_clusters().await.unwrap();
 
             //check if the last free is done successfully
@@ -880,7 +881,8 @@ mod tests {
             let res = dev.allocate_clusters(to_alloc).await.unwrap().unwrap();
             dev.flush_meta().await.unwrap();
 
-            let dev2 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+            let read_params = qcow2_default_params!(true, false);
+            let dev2 = qcow2_setup_dev_tokio(&path, &read_params).await.unwrap();
             let curr = dev2.count_alloc_clusters().await.unwrap();
 
             /*
@@ -899,7 +901,7 @@ mod tests {
                 dev.flush_meta().await.unwrap();
             }
 
-            let dev3 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+            let dev3 = qcow2_setup_dev_tokio(&path, &read_params).await.unwrap();
             let curr = dev3.count_alloc_clusters().await.unwrap();
 
             //check if the last free is done successfully
@@ -931,7 +933,8 @@ mod tests {
                 dev.flush_meta().await.unwrap();
             }
 
-            let dev2 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
+            let read_params = qcow2_default_params!(true, false);
+            let dev2 = qcow2_setup_dev_tokio(&path, &read_params).await.unwrap();
             let curr = dev2.count_alloc_clusters().await.unwrap();
 
             // 1 extra cluster is for refblock

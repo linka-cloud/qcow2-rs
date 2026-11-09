@@ -11,6 +11,8 @@ use std::path::Path;
 pub struct Qcow2IoSync {
     file: File,
     fd: i32,
+    #[cfg(target_os = "linux")]
+    _lock: crate::locking::ImageLock,
 }
 
 impl Qcow2IoSync {
@@ -26,7 +28,14 @@ impl Qcow2IoSync {
             crate::ops::set_direct_io(fd);
         }
 
-        Ok(Qcow2IoSync { file, fd })
+        #[cfg(target_os = "linux")]
+        let lock = crate::locking::ImageLock::acquire(&file, path, ro)?;
+        Ok(Qcow2IoSync {
+            file,
+            fd,
+            #[cfg(target_os = "linux")]
+            _lock: lock,
+        })
     }
 
     #[inline(always)]

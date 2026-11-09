@@ -271,5 +271,6 @@ async fn ordinary_partial_write_initializes_the_entire_new_payload_cluster() {
     assert!(cluster[..512].iter().all(|b| *b == 0xa7));
     assert!(cluster[512..].iter().all(|b| *b == 0));
     dev.check().await.unwrap();
+    drop(dev);
     check(&path);
 }

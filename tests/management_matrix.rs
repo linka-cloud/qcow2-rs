@@ -214,7 +214,11 @@ async fn amend_rebase_and_commit_preserve_a_model_through_multiple_representatio
             .await
             .unwrap();
             verify(&dev, &model).await;
+            drop(dev);
             independent_check(dir.path(), &model);
+            dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+                .await
+                .unwrap();
         }
         let new_base = dir.path().join("replacement.raw");
         std::fs::write(&new_base, vec![0x63; initial.len() * 2]).unwrap();
@@ -242,7 +246,12 @@ async fn amend_rebase_and_commit_preserve_a_model_through_multiple_representatio
         assert_eq!(&committed[..model.len()], &model);
         assert!(committed[model.len()..].iter().all(|b| *b == 0x63));
         verify(&dev, &model).await;
+        drop(dev);
+        drop(target);
         independent_check(dir.path(), &model);
+        let mut dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+            .await
+            .unwrap();
         dev.restore_snapshot("old").await.unwrap();
         dev.rebase(None, true).await.unwrap();
         verify(&dev, &initial).await;

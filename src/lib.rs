@@ -2,6 +2,8 @@ pub mod cache;
 pub mod dev;
 pub mod error;
 pub mod helpers;
+#[cfg(target_os = "linux")]
+pub mod locking;
 pub mod meta;
 pub mod ops;
 #[cfg(not(target_os = "windows"))]

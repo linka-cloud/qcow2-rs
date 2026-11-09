@@ -56,6 +56,13 @@ fallible `try_new` constructors; their existing `new` constructors retain their
 original return types. Custom backends using the setup macros must provide
 `try_new` with the same arguments and a `Qcow2Result<Self>` return type.
 
+On Linux, built-in file handles hold QEMU-compatible advisory OFD locks for
+the image, backing chain, and external data. Conflicting opens fail with
+`WouldBlock` and the path of the locked file. Read-only processes can share an
+image, and a writer excludes other processes that use this locking protocol.
+The last handle releases the lock. Custom file backends can acquire the same
+lock with `locking::ImageLock`.
+
 Call `flush_meta()` to persist metadata after writes; dropping the device does
 not flush dirty caches. See [PLAN.md](PLAN.md) for implemented features, current
 limits, validation results, and remaining work.
@@ -165,8 +172,9 @@ Management APIs use the same serialized transaction path as advanced writes:
   subsequent writes; shared snapshots and metadata COW still need free space.
 
 Run management with exclusive ownership of the image and affected backing chain.
-Device locks serialize operations within these handles; separate processes or
-independently opened writers are not coordinated. Preserving rebase, commit, and
+Each device serializes its own operations. Linux allows one writer per file in
+a process and shares its lock with local readers for backing commits. Coordinate
+I/O between those handles. Preserving rebase, commit, and
 metadata conversion can copy the complete disk and every snapshot, requiring
 substantial time and temporary space. They do not reclaim the sparse file's high
 water mark. A failed layout/backing publication can require closing and reopening

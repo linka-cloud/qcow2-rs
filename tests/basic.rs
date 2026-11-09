@@ -163,6 +163,7 @@ mod integretion {
             }
             dev.check().await.unwrap();
 
+            drop(dev);
             let dev2 = qcow2_setup_dev_tokio(&path, &params).await.unwrap();
             dev2.read_at(&mut buf2[..], 0).await.unwrap();
 

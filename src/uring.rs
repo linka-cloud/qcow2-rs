@@ -77,6 +77,7 @@ unsafe impl IoBuf for SliceBuf {
 #[derive(Debug)]
 pub struct Qcow2IoUring {
     file: File,
+    _lock: crate::locking::ImageLock,
 }
 
 impl Qcow2IoUring {
@@ -96,7 +97,8 @@ impl Qcow2IoUring {
         if dio {
             crate::ops::set_direct_io(file.as_raw_fd());
         }
-        Ok(Qcow2IoUring { file })
+        let lock = crate::locking::ImageLock::acquire_fd(file.as_raw_fd(), path, ro)?;
+        Ok(Qcow2IoUring { file, _lock: lock })
     }
 }
 

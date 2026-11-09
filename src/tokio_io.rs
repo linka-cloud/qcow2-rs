@@ -14,6 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 pub struct Qcow2IoTokio {
     file: tokio::sync::Mutex<File>,
     fd: i32,
+    #[cfg(target_os = "linux")]
+    _lock: crate::locking::ImageLock,
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -40,7 +42,11 @@ impl Qcow2IoTokio {
             .await?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let fd = file.as_raw_fd();
+        #[cfg(target_os = "linux")]
+        let lock = crate::locking::ImageLock::acquire_fd(fd, path, ro)?;
         Ok(Qcow2IoTokio {
+            #[cfg(target_os = "linux")]
+            _lock: lock,
             file: tokio::sync::Mutex::new(file),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             fd,

@@ -538,7 +538,9 @@ fn __dump_header(f: &PathBuf, h: &Qcow2Header) {
 }
 
 fn dump_header(p: &PathBuf) -> Qcow2Result<()> {
-    let mut f = std::fs::OpenOptions::new().read(true).open(p).unwrap();
+    let mut f = std::fs::File::open(p)?;
+    #[cfg(target_os = "linux")]
+    let _lock = qcow2_rs::locking::ImageLock::acquire(&f, p, true)?;
     let mut buf = vec![0_u8; 4096];
     let _ = f.read(&mut buf).unwrap();
     let header = Qcow2Header::from_buf(&buf).unwrap();
@@ -549,10 +551,9 @@ fn dump_header(p: &PathBuf) -> Qcow2Result<()> {
 }
 
 fn dump_qcow2(args: DumpArgs) -> Qcow2Result<()> {
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .open(&args.file)
-        .unwrap();
+    let mut f = std::fs::File::open(&args.file)?;
+    #[cfg(target_os = "linux")]
+    let _lock = qcow2_rs::locking::ImageLock::acquire(&f, &args.file, true)?;
     let mut buf = vec![0_u8; 4096];
     let _ = f.read(&mut buf).unwrap();
 
@@ -596,16 +597,16 @@ fn format_qcow2(args: FormatArgs, context: &OpenContext) -> Qcow2Result<()> {
 }
 
 fn map_qcow2(args: MapArgs, context: &OpenContext) -> Qcow2Result<()> {
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new()?;
     rt.block_on(async move {
-        let p = image_params(false, false, context);
-        let dev = qcow2_setup_dev_tokio(&args.file, &p).await.unwrap();
+        let p = image_params(true, false, context);
+        let dev = qcow2_setup_dev_tokio(&args.file, &p).await?;
         let cls_bits = dev.info.cluster_bits();
         let mut start = args.addr & (!((1 << cls_bits) - 1) as u64);
 
         let mut i = 0;
         while i < args.len && start < dev.info.virtual_size() {
-            let mapping = dev.get_mapping(start).await.unwrap();
+            let mapping = dev.get_mapping(start).await?;
 
             if mapping.allocated() {
                 println!("virt_addr {:x} mapping {}", start, mapping);
@@ -614,16 +615,15 @@ fn map_qcow2(args: MapArgs, context: &OpenContext) -> Qcow2Result<()> {
 
             start += dev.info.cluster_size() as u64;
         }
-    });
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn info_qcow2(args: InfoArgs, context: &OpenContext) -> Qcow2Result<()> {
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new()?;
     rt.block_on(async move {
         let p = image_params(true, false, context);
-        let dev = qcow2_setup_dev_tokio(&args.file, &p).await.unwrap();
+        let dev = qcow2_setup_dev_tokio(&args.file, &p).await?;
         println!("Capabilities: {:?}", dev.capabilities().await);
         let info = &dev.info;
         println!("{:?}", dev);
@@ -679,8 +679,7 @@ fn info_qcow2(args: InfoArgs, context: &OpenContext) -> Qcow2Result<()> {
                 }
             }
         })
-        .await
-        .unwrap();
+        .await?;
 
         let mapped_cnt = *mapped.borrow();
         let used_ratio = *used.borrow() * 100 / total_clusters.max(1);
@@ -698,8 +697,8 @@ fn info_qcow2(args: InfoArgs, context: &OpenContext) -> Qcow2Result<()> {
             *used.borrow(),
             used_ratio
         );
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 fn check_qcow2(args: CheckArgs, context: &OpenContext) -> Qcow2Result<()> {
@@ -756,7 +755,15 @@ async fn convert_from_qcow2_dev<T: Qcow2IoOps>(dev: &Qcow2Dev<T>, raw: &Path) ->
             }
         }
     }
-    let mut file = std::fs::File::create(raw)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(cfg!(target_os = "linux"))
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(raw)?;
+    #[cfg(target_os = "linux")]
+    let _lock = qcow2_rs::locking::ImageLock::acquire(&file, raw, false)?;
+    file.set_len(0)?;
     let mut off: u64 = 0;
     let buf_size = 8 << 20;
     let total = dev.info.virtual_size();
@@ -772,40 +779,35 @@ async fn convert_from_qcow2_dev<T: Qcow2IoOps>(dev: &Qcow2Dev<T>, raw: &Path) ->
     Ok(())
 }
 
-async fn convert_to_qcow2_dev<T: Qcow2IoOps>(raw: &Path, dev: &Qcow2Dev<T>) -> Qcow2Result<()> {
-    let file_orig_size = std::fs::metadata(raw).unwrap().len();
-    let mut file = std::fs::OpenOptions::new().read(true).open(raw).unwrap();
+async fn convert_to_qcow2_dev<T: Qcow2IoOps>(
+    raw: &mut std::fs::File,
+    path: &Path,
+    io: T,
+    params: &Qcow2DevParams,
+) -> Qcow2Result<()> {
+    let total = raw.metadata()?.len();
+    let cluster_size = 1 << 16;
+    let size = total
+        .checked_add(cluster_size - 1)
+        .ok_or("Image size overflow")?
+        & !(cluster_size - 1);
+    let metadata = __format_qcow2_buf(size, 16, 4, 4096);
+    let mut aligned = Qcow2IoBuf::<u8>::new(metadata.len());
+    aligned.copy_from_slice(&metadata);
+    io.set_len(0).await?;
+    io.write_from(0, &aligned).await?;
+    io.fsync(0, 0, 0).await?;
+    let (dev, _) = qcow2_rs::utils::qcow2_alloc_dev(path, io, params).await?;
+    dev.qcow2_prep_io().await?;
 
-    let mut off: u64 = 0;
+    let mut off = 0;
     let buf_size = 8 << 20;
-    let total = file_orig_size;
     while off < total {
         let len = std::cmp::min(buf_size, total - off);
-        let res = copy_to_qcow2(dev, &mut file, off, len as usize).await?;
+        let res = copy_to_qcow2(&dev, raw, off, len as usize).await?;
         off += res as u64;
     }
-    dev.flush_meta().await?;
-
-    Ok(())
-}
-
-fn convert_to_qcow2_prep(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
-    let cluster_bits = 16;
-    let cluster_size = 1 << cluster_bits;
-    let file_orig_size = std::fs::metadata(raw).unwrap().len();
-    let file_size = (file_orig_size + cluster_size - 1) & !(cluster_size - 1);
-
-    let img_buf = __format_qcow2_buf(file_size, cluster_bits, 4, 4096);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(qcow2)
-        .unwrap();
-    f.write_all(&img_buf)?;
-    f.sync_all()?;
-
-    Ok(())
+    dev.flush_meta().await
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -828,27 +830,32 @@ fn convert_from_qcow2(qcow2: &Path, raw: &Path, context: &OpenContext) -> Qcow2R
     })
 }
 
-#[cfg(not(target_os = "linux"))]
 fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
-    convert_to_qcow2_prep(raw, qcow2)?;
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut input = std::fs::File::open(raw)?;
+    #[cfg(target_os = "linux")]
+    let _lock = qcow2_rs::locking::ImageLock::acquire(&input, raw, true)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(qcow2)?;
 
-    rt.block_on(async {
-        let p = image_params(false, false, &OpenContext::default());
-        let dev = qcow2_rs::utils::qcow2_setup_dev_tokio(qcow2, &p).await?;
-        convert_to_qcow2_dev(raw, &dev).await
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn convert_to_qcow2(raw: &Path, qcow2: &Path) -> Qcow2Result<()> {
-    convert_to_qcow2_prep(raw, qcow2)?;
-
-    tokio_uring::start(async {
-        let p = image_params(false, true, &OpenContext::default());
-        let dev = qcow2_rs::utils::qcow2_setup_dev_uring(qcow2, &p).await?;
-        convert_to_qcow2_dev(raw, &dev).await
-    })
+    let params = image_params(false, cfg!(target_os = "linux"), &OpenContext::default());
+    let convert = async {
+        #[cfg(target_os = "linux")]
+        let io = qcow2_rs::uring::Qcow2IoUring::try_new(qcow2, false, true).await?;
+        #[cfg(not(target_os = "linux"))]
+        let io = qcow2_rs::tokio_io::Qcow2IoTokio::try_new(qcow2, false, false).await?;
+        convert_to_qcow2_dev(&mut input, qcow2, io, &params).await
+    };
+    #[cfg(target_os = "linux")]
+    {
+        tokio_uring::start(convert)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Runtime::new()?.block_on(convert)
+    }
 }
 
 fn __convert_qcow2(args: ConvertArgs, context: &OpenContext) -> Qcow2Result<()> {
@@ -1011,7 +1018,17 @@ fn image_params(read_only: bool, direct: bool, context: &OpenContext) -> Qcow2De
     params
 }
 
-fn main() -> Qcow2Result<()> {
+fn main() -> std::process::ExitCode {
+    match run_cli() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("rqcow2: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_cli() -> Qcow2Result<()> {
     let cli = Cli::parse();
     let context = OpenContext::load(
         cli.secret_file,

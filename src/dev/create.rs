@@ -168,9 +168,15 @@ pub async fn create_qcow2(path: &Path, options: &CreateOptions) -> Qcow2Result<(
         }
     };
     let mut options = options.clone();
+    #[cfg(target_os = "linux")]
+    let _backing_lock;
     if let Some(backing) = &mut options.backing {
         let back_path = resolve(&backing.path);
-        std::fs::File::open(&back_path)?;
+        let _backing_file = std::fs::File::open(&back_path)?;
+        #[cfg(target_os = "linux")]
+        {
+            _backing_lock = crate::locking::ImageLock::acquire(&_backing_file, &back_path, true)?;
+        }
         if backing.format.is_none() {
             backing.format = Some(if crate::utils::qcow2_backing_is_raw(&back_path, None)? {
                 BackingFormat::Raw

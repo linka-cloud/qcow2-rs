@@ -69,7 +69,11 @@ async fn metadata_conversions_preserve_snapshots_and_relocate_vm_state() {
             .unwrap();
         assert_eq!(saved, vm);
         dev.check().await.unwrap();
+        drop(dev);
         check(&path);
+        dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+            .await
+            .unwrap();
     }
     dev.restore_snapshot("saved").await.unwrap();
     dev.read_at(&mut buf, 0).await.unwrap();
@@ -110,7 +114,11 @@ async fn refcount_conversion_preserves_bitmaps_and_validates_downgrades() {
         .unwrap();
         assert_eq!(dev.read_bitmap("tracking").await.unwrap()[0], 1);
         dev.check().await.unwrap();
+        drop(dev);
         check(&path);
+        dev = qcow2_setup_dev_tokio(&path, &options.open_params)
+            .await
+            .unwrap();
     }
 }
 
@@ -265,6 +273,7 @@ async fn encrypted_vm_state_survives_l2_and_version_conversion() {
             if String::from_utf8_lossy(&help.stdout).contains("encrypt.format")
                 && (!extended || String::from_utf8_lossy(&help.stdout).contains("extended_l2"))
             {
+                drop(dev);
                 let out = Command::new("qemu-img")
                     .current_dir(dir.path())
                     .args([
@@ -277,6 +286,7 @@ async fn encrypted_vm_state_survives_l2_and_version_conversion() {
                     .output()
                     .unwrap();
                 assert!(out.status.success(), "{out:?}");
+                dev = qcow2_setup_dev_tokio(&path, &p).await.unwrap();
             }
         }
     }
@@ -356,5 +366,6 @@ async fn old_v2_snapshots_gain_explicit_disk_sizes_before_resize() {
     dev.restore_snapshot("old").await.unwrap();
     assert_eq!(dev.info.virtual_size(), 1 << 20);
     dev.check().await.unwrap();
+    drop(dev);
     check(&path);
 }
