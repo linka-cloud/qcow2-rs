@@ -691,7 +691,7 @@ take several minutes in either build profile. Seeds and fixture dimensions are f
 no user disks, external services, or manually filled filesystems are involved.
 CI runs debug and release tests on Linux, Windows, macOS, and a native FreeBSD VM. The Windows fixture
 package follows [QEMU's MSYS2 installation guidance](https://www.qemu.org/download/)
-and uses the [MSYS2 image-utility package](https://packages.msys2.org/packages/mingw-w64-x86_64-qemu-image-util).
+and uses the [MSYS2 image-utility package](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-qemu-image-util).
 FreeBSD uses a [native VM action](https://github.com/vmactions/freebsd-vm) with
 Tokio/synchronous backends and system Rust/QEMU/OpenSSL packages.
 Non-Linux runtime outcomes require those remote jobs; editing their configuration
