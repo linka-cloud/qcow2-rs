@@ -80,10 +80,22 @@ jobs:
         python -c "import subprocess; h=subprocess.check_output(['qemu-img','create','-f','qcow2','-o','help'],text=True); assert all(x in h for x in ['extended_l2','data_file','compression_type','encrypt.format']),h"
      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
      - run: rustup component add clippy
-     - name: Install OpenSSL for MSVC
+     - name: Configure the runner's OpenSSL for MSVC
        run: |
-        vcpkg install openssl:x64-windows-static-md
-        "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        $openssl = Join-Path $env:ProgramFiles 'OpenSSL'
+        $includeDir = Join-Path $openssl 'include'
+        $libDir = Join-Path $openssl 'lib\VC\x64\MD'
+        foreach ($file in @("$includeDir\openssl\ssl.h", "$libDir\libssl_static.lib", "$libDir\libcrypto_static.lib")) {
+          if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+            throw "Missing OpenSSL development file $file"
+          }
+        }
+        @(
+          "OPENSSL_INCLUDE_DIR=$includeDir"
+          "OPENSSL_LIB_DIR=$libDir"
+          'OPENSSL_LIBS=libssl_static:libcrypto_static'
+          'OPENSSL_STATIC=1'
+        ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
      - run: cargo build --verbose
      - run: cargo clippy --all-targets --no-deps
      - name: Rust test(debug)

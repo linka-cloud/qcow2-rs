@@ -266,8 +266,8 @@ Building requires a C compiler and OpenSSL development libraries. On Debian or
 Ubuntu, install `pkg-config libssl-dev`; on Windows/MSVC, install OpenSSL through
 vcpkg (for example `openssl:x64-windows-static-md`) and set `VCPKG_ROOT` to its
 installation. See the [OpenSSL build instructions](https://docs.rs/openssl/latest/openssl/#building)
-for other platforms. Zstd is built through its Rust dependency. CI provisions native
-OpenSSL for Linux/i686 and Windows; only the Linux execution was verified locally.
+for other platforms. Zstd is built through its Rust dependency. Windows CI uses the
+runner's preinstalled OpenSSL headers and static MSVC libraries.
 
 ## Example
 
