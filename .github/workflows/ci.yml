@@ -20,7 +20,7 @@ jobs:
           - x86_64-unknown-linux-gnu
           - i686-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - name: Install dependencies
         if: matrix.target == 'i686-unknown-linux-gnu'
         run: |
@@ -42,7 +42,7 @@ jobs:
         toolchain:
           - stable
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v5
       - run: sudo apt-get update
       - run: sudo apt-get install -y qemu-utils pkg-config libssl-dev
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
@@ -61,7 +61,7 @@ jobs:
           - stable
     steps:
      - name: Checkout repository
-       uses: actions/checkout@v4
+       uses: actions/checkout@v5
      # https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-qemu-image-util
      - uses: msys2/setup-msys2@v2
        id: msys2
@@ -95,7 +95,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install fixture and crypto dependencies
         run: |
           brew install qemu pkg-config openssl@3
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Test native Tokio and synchronous backends in FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
